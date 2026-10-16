@@ -1,0 +1,10 @@
+# 统一换行：仓库里一律 LF，避免 Windows 上每次 add/commit 都刷一堆
+# "LF will be replaced by CRLF" 警告，也让跨平台 diff 干净。
+* text=auto eol=lf
+
+# 二进制/产物不做换行转换
+*.ico binary
+*.png binary
+*.zip binary
+*.db binary
+*.exe binary
