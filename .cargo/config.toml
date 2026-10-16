@@ -1,0 +1,7 @@
+# 静态链接 CRT：产物不依赖 vcruntime140.dll，真正做到"拷走就能跑"。
+# 用 dumpbin /dependents 验证（见 scripts/build.ps1）。
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

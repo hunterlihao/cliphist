@@ -1,0 +1,61 @@
+[package]
+name = "cliphist"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "剪贴板历史 - 便携版 Windows 剪贴板历史工具（文本/文件/图片）"
+license = "MIT"
+
+[lib]
+name = "cliphist"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ClipHist"
+path = "src/main.rs"
+
+[dependencies]
+# 原生 Win32：全部 API 已在 windows-sys 0.61.2 中逐一核实存在。
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Time",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    # CreateMutexW / RegCreateKeyExW 的签名里带 SECURITY_ATTRIBUTES，
+    # windows-sys 会因此把它们门控在 Win32_Security 之下 —— 不开这个特性会直接编译不过。
+    "Win32_Security",
+] }
+
+# bundled：把 sqlite3.c 一起编译，不依赖系统库，符合"便携、零外部依赖"。
+# 本机 VS2022 Community 提供 MSVC，可离线编译（同机 topmost-pin 已验证同组合）。
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# PNG 编解码。选 0.17.x：API 稳定，不追 0.18 的接口变动。
+png = "0.17"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 16
+panic = "abort"
+strip = true
+
+# ★ bundled 的 sqlite3.c 有 8MB，dev/test profile 默认带调试信息，
+#   会让本机 MSVC 直接失败：cl : Command line error D8050 : cannot execute 'c1.dll'。
+#   release 天然没有调试信息，所以只有 cargo test 会踩到 —— 很隐蔽。关掉即可。
+[profile.dev.package.libsqlite3-sys]
+debug = false
+
+[profile.test.package.libsqlite3-sys]
+debug = false

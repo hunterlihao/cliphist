@@ -1,0 +1,5 @@
+/target
+/dist-portable/*.zip
+/dist-portable/data.db
+/dist-portable/data.db-journal
+*.pdb
