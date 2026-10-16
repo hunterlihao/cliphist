@@ -354,12 +354,9 @@ impl App {
         let (read, recovered) = match Store::open_or_recover(&data.path) {
             Ok(v) => v,
             Err(e) => {
-                // 连库都开不了：把原因说出来，而不是静默退出。
-                show_error(&format!(
-                    "无法打开数据文件：\n{}\n\n{}",
-                    data.path.display(),
-                    e
-                ));
+                // 注意：只有"真损坏"才会走到隔离重建；这里能走到说明是占用/权限问题，
+                // 程序退出前绝不会改动用户的文件。
+                show_error(&e.to_string());
                 return None;
             }
         };

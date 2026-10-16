@@ -337,6 +337,32 @@ fn write_locked(payload: &Payload<'_>) -> Result<(), String> {
     }
 }
 
+/// 写入任意注册格式（可选附带文本）。
+///
+/// 用途：自检时伪造"请勿记录"标记、以及将来做"忽略某个程序"时写自定义标记。
+pub fn write_registered(name: &str, bytes: &[u8], text: Option<&str>) -> Result<(), String> {
+    if !open_with_retry(std::ptr::null_mut(), 5, 20) {
+        return Err("剪贴板被其他程序占用".to_string());
+    }
+    let result = (|| -> Result<(), String> {
+        if unsafe { EmptyClipboard() } == 0 {
+            return Err("清空剪贴板失败".to_string());
+        }
+        let id = format_id(name);
+        if id == 0 {
+            return Err(format!("注册剪贴板格式失败：{name}"));
+        }
+        set_bytes(id, bytes)?;
+        if let Some(t) = text {
+            let utf16: Vec<u16> = t.encode_utf16().chain(std::iter::once(0)).collect();
+            set_bytes(CF_UNICODETEXT, crate::win::strings::wide_as_bytes(&utf16))?;
+        }
+        Ok(())
+    })();
+    unsafe { CloseClipboard() };
+    result
+}
+
 /// 分配 `GMEM_MOVEABLE` 全局内存并写入剪贴板；成功后所有权归系统。
 fn set_bytes(fmt: u32, bytes: &[u8]) -> Result<(), String> {
     let len = bytes.len().max(1);

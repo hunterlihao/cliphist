@@ -70,6 +70,56 @@ impl PruneReport {
     }
 }
 
+/// 打开数据文件失败的原因。
+///
+/// **区分这两者是安全底线**：只有"真损坏"才允许隔离重建；
+/// "被占用 / 无权限 / 路径不可达"绝不能改名或删除用户的库 ——
+/// SQLite 在库被另一个连接独占时返回的是 BUSY，若把它当成损坏，
+/// 一次瞬时锁就会让用户的历史"消失"（被改名成 corrupt 文件）。
+#[derive(Debug)]
+pub enum OpenFailure {
+    Corrupt { path: PathBuf, detail: String },
+    Unavailable { path: PathBuf, detail: String },
+}
+
+impl std::fmt::Display for OpenFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenFailure::Corrupt { path, detail } => write!(
+                f,
+                "数据文件已损坏：{}\n原因：{detail}",
+                path.display()
+            ),
+            OpenFailure::Unavailable { path, detail } => write!(
+                f,
+                "无法打开数据文件：{}\n原因：{detail}\n\
+                 （文件没有被改动。若程序已在运行，请先退出那个实例；\
+                 也请检查文件是否被其他程序占用或目录是否可写。）",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OpenFailure {}
+
+/// 把一个 rusqlite 错误归类：只有 NOTADB / CORRUPT 才算"真损坏"。
+fn classify(path: &Path, e: rusqlite::Error) -> OpenFailure {
+    if let rusqlite::Error::SqliteFailure(err, ref msg) = e {
+        use rusqlite::ErrorCode;
+        if matches!(err.code, ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt) {
+            return OpenFailure::Corrupt {
+                path: path.to_path_buf(),
+                detail: msg.clone().unwrap_or_else(|| e.to_string()),
+            };
+        }
+    }
+    OpenFailure::Unavailable {
+        path: path.to_path_buf(),
+        detail: e.to_string(),
+    }
+}
+
 /// 数据库连接 + 表结构。读连接与写连接各持有一个实例（SQLite 自己处理并发）。
 pub struct Store {
     conn: Connection,
@@ -79,20 +129,21 @@ pub struct Store {
 }
 
 impl Store {
-    /// 打开数据库；若文件损坏（`quick_check` 失败）则隔离旧文件并重建。
+    /// 打开数据库；**仅在确认损坏时**隔离旧文件并重建。
     ///
     /// 返回 `(store, Some(隔离文件路径))` 表示发生过恢复 —— 调用方应当把这件事告诉用户，
     /// 而不是静默丢历史。
-    pub fn open_or_recover(db_path: &Path) -> rusqlite::Result<(Store, Option<PathBuf>)> {
+    pub fn open_or_recover(db_path: &Path) -> Result<(Store, Option<PathBuf>), OpenFailure> {
         if let Some(dir) = db_path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let mut recovered = None;
 
         if db_path.exists() {
             match Store::open_inner(db_path) {
                 Ok(store) => return Ok((store, None)),
-                Err(_) => {
+                // 被占用/无权限：原样上抛，绝不碰用户的文件。
+                Err(fail @ OpenFailure::Unavailable { .. }) => return Err(fail),
+                Err(OpenFailure::Corrupt { .. }) => {
                     let stamp = now_ms();
                     let quarantine = db_path.with_extension(format!("db.corrupt-{stamp}"));
                     // 第一次改名失败就退化成删除，保证程序总能起来。
@@ -103,34 +154,53 @@ impl Store {
                         let p = PathBuf::from(format!("{}{side}", db_path.display()));
                         let _ = std::fs::remove_file(p);
                     }
-                    recovered = Some(quarantine);
+                    let store = Store::open_inner(db_path)?;
+                    return Ok((store, Some(quarantine)));
                 }
             }
         }
 
         let store = Store::open_inner(db_path)?;
-        Ok((store, recovered))
+        Ok((store, None))
     }
 
-    fn open_inner(db_path: &Path) -> rusqlite::Result<Store> {
-        let conn = Connection::open(db_path)?;
+    fn open_inner(db_path: &Path) -> Result<Store, OpenFailure> {
+        let conn = Connection::open(db_path).map_err(|e| classify(db_path, e))?;
+        // busy_timeout 必须**最先**设置：否则紧接着的 journal_mode 在库被其他连接
+        // 占用时会立刻返回 BUSY，而不是等待。
+        conn.execute_batch("PRAGMA busy_timeout=2000;")
+            .map_err(|e| classify(db_path, e))?;
         // journal_mode 会返回一行结果，必须用 query_row 读掉。
-        let _: String = conn.query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))?;
+        let _: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+            .map_err(|e| classify(db_path, e))?;
         conn.execute_batch(
             "PRAGMA synchronous=NORMAL;
              PRAGMA cache_size=-512;
              PRAGMA mmap_size=0;
              PRAGMA foreign_keys=ON;
-             PRAGMA busy_timeout=2000;
              PRAGMA temp_store=MEMORY;",
-        )?;
+        )
+        .map_err(|e| classify(db_path, e))?;
+
         let store = Store {
             conn,
             path: db_path.to_path_buf(),
             deleted_since_vacuum: 0,
         };
-        store.migrate()?;
-        store.verify()?;
+        store.migrate().map_err(|e| classify(db_path, e))?;
+
+        // 完整性检查放在最后：只有这里失败才算"真损坏"。
+        let ok: String = store
+            .conn
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .map_err(|e| classify(db_path, e))?;
+        if ok != "ok" {
+            return Err(OpenFailure::Corrupt {
+                path: db_path.to_path_buf(),
+                detail: format!("完整性检查未通过：{ok}"),
+            });
+        }
         Ok(store)
     }
 
@@ -163,16 +233,6 @@ impl Store {
             self.set_meta("schema.version", &SCHEMA_VERSION.to_string())?;
         }
         Ok(())
-    }
-
-    /// 完整性检查。返回 `Err` 表示文件不可用，交给 `open_or_recover` 走隔离重建。
-    fn verify(&self) -> rusqlite::Result<()> {
-        let ok: String = self.conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
-        if ok == "ok" {
-            Ok(())
-        } else {
-            Err(rusqlite::Error::InvalidQuery)
-        }
     }
 
     pub fn path(&self) -> &Path {
@@ -890,5 +950,62 @@ mod tests {
         drop(s);
         let _ = std::fs::remove_file(&quarantined);
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// 这是本模块最重要的一条回归测试。
+    ///
+    /// 曾经把"打开失败"一律当成损坏 → 只要库被另一个连接瞬时独占（另一个实例在写、
+    /// 杀进程后句柄未释放、杀软正在扫描），就会把用户的历史改名成 corrupt 文件。
+    /// 现在必须报 `Unavailable` 并且**原地保留文件**。
+    #[test]
+    fn busy_database_is_reported_unavailable_not_quarantined() {
+        let p = tmp_db("busy");
+        let (first, _) = Store::open_or_recover(&p).unwrap();
+        assert_eq!(first.stats().unwrap().0, 0);
+
+        // 另开一个连接并长期持有排它锁，模拟"另一个实例正在写"
+        let blocker = Connection::open(&p).unwrap();
+        blocker.execute_batch("PRAGMA busy_timeout=0; BEGIN EXCLUSIVE;").unwrap();
+
+        let result = Store::open_or_recover(&p);
+        blocker.execute_batch("ROLLBACK;").unwrap();
+
+        match result {
+            Err(OpenFailure::Unavailable { .. }) => {}
+            Err(OpenFailure::Corrupt { .. }) => panic!("占用被误判成损坏，用户历史会被隔离丢失"),
+            Ok(_) => panic!("库被独占时不应该打开成功"),
+        }
+        assert!(p.exists(), "数据文件必须原地保留");
+        // 目录里不能出现任何隔离文件
+        let dir = p.parent().unwrap();
+        let quarantined: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("busy") && n.contains("corrupt"))
+            .collect();
+        assert!(quarantined.is_empty(), "不该产生隔离文件：{quarantined:?}");
+
+        drop(first);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn unavailable_error_message_mentions_no_modification() {
+        // 面向用户的措辞必须让人放心：文件没被动过，以及该检查什么。
+        let fail = OpenFailure::Unavailable {
+            path: PathBuf::from(r"C:\x\data.db"),
+            detail: "database is locked".into(),
+        };
+        let text = fail.to_string();
+        assert!(text.contains("data.db"));
+        assert!(text.contains("没有被改动"));
+        assert!(text.contains("请先退出那个实例"));
+
+        let corrupt = OpenFailure::Corrupt {
+            path: PathBuf::from(r"C:\x\data.db"),
+            detail: "file is not a database".into(),
+        };
+        assert!(corrupt.to_string().contains("已损坏"));
     }
 }

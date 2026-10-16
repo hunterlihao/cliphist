@@ -1,5 +1,4 @@
 /target
-/dist-portable/*.zip
-/dist-portable/data.db
-/dist-portable/data.db-journal
+# dist-portable 是构建产物目录（可执行文件 + 首次运行生成的 data.db），不入库
+/dist-portable/
 *.pdb

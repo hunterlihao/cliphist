@@ -14,6 +14,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |flag: &str| args.iter().any(|a| a == flag);
+    let flag_value = |flag: &str| -> Option<String> {
+        let i = args.iter().position(|a| a == flag)?;
+        args.get(i + 1).cloned()
+    };
+    let arg_value = |args: &[String], flag: &str| -> Option<Option<usize>> {
+        let i = args.iter().position(|a| a == flag)?;
+        Some(args.get(i + 1).and_then(|v| v.parse().ok()))
+    };
 
     if has("--version") || has("-v") {
         println!("{} {} (portable)", cliphist::APP_TITLE, cliphist::VERSION);
@@ -25,6 +33,12 @@ fn main() -> ExitCode {
     }
     if has("--selftest") {
         return selftest();
+    }
+    if has("--selftest-clipboard") {
+        return selftest_clipboard();
+    }
+    if let Some(n) = arg_value(&args, "--bench-fill") {
+        return bench_fill(n.unwrap_or(500), flag_value("--log"));
     }
 
     // ① DPI 感知必须在创建任何窗口之前设置：否则整个界面会被系统按位图拉伸，中文发虚。
@@ -81,9 +95,312 @@ fn print_help() {
     println!("用法：ClipHist.exe [选项]");
     println!("  --autostart   开机自启模式（安静启动，不弹提示）");
     println!("  --selftest    跑存储与编解码自检后退出");
+    println!("  --selftest-clipboard  跑剪贴板读写自检后退出（会覆盖当前剪贴板内容）");
+    println!("  --bench-fill [N]      往当前数据文件预填 N 条历史（默认 500），用于内存基准测试");
     println!("  --version     打印版本");
     println!();
     println!("数据文件：data.db（程序同目录；该目录不可写时回退到 %LOCALAPPDATA%\\ClipHist）");
+}
+
+/// 基准填充：往**当前数据文件**里预填 N 条历史。
+///
+/// 存在的理由：本项目最核心的性能主张是"常驻内存与历史条数解耦"，
+/// 而验证它必须有一个装了几百条历史的库。这个开关用**正式的 Store 代码**填充，
+/// 因此不会出现"脚本自己造库、DDL 与代码漂移"的假验证。
+///
+/// `--log <路径>` 会把结果同时写一份到文件。脚本化调用请用它，**不要**让父进程去
+/// 捕获本进程的标准输出：在受限沙箱/非交互式嵌套 shell 里，那类管道重定向实测会互相
+/// 等待而卡死（这也是本参数存在的唯一原因）。
+///
+/// ⚠ 会写进真实数据文件（便携目录或 %LOCALAPPDATA%）。基准测试请先复制一份程序
+///   到临时目录再运行（`scripts\measure-memory.ps1` 就是这么做的）。
+fn bench_fill(count: usize, log_path: Option<String>) -> ExitCode {
+    use cliphist::core::filter::{make_files_preview, make_text_preview};
+    use cliphist::core::hash::hash_str;
+    use cliphist::core::model::{CapturedItem, PathEntry};
+    use cliphist::core::payload::hash_paths;
+    use cliphist::core::store::{Store, now_ms};
+
+    let mut report: Vec<String> = Vec::new();
+    let data = cliphist::win::paths::resolve_data_location();
+    println!("数据文件：{}", data.path.display());
+    report.push(format!("db_path={}", data.path.display()));
+    println!("预填 {count} 条…");
+
+    let Ok((mut store, recovered)) = Store::open_or_recover(&data.path) else {
+        eprintln!("无法打开数据文件");
+        return ExitCode::from(6);
+    };
+    if let Some(p) = recovered {
+        println!("（注意：原数据文件损坏，已隔离为 {}）", p.display());
+        report.push(format!("recovered={}", p.display()));
+    }
+
+    let start = std::time::Instant::now();
+    let base = now_ms() - (count as i64) * 60_000;
+    let mut inserted = 0usize;
+    for i in 0..count {
+        // 混入不同长度与类型，避免用"等长纯英文"这种不真实的样本自我安慰
+        let item = match i % 5 {
+            0 => {
+                let text = format!(
+                    "第 {i} 条文本：中文与 English 混排，用于检验预览截断与等宽对齐。{}",
+                    "补充内容 ".repeat(i % 40)
+                );
+                CapturedItem::text(
+                    make_text_preview(&text, 200),
+                    text.clone(),
+                    hash_str(&text),
+                    Some(if i % 2 == 0 { "chrome.exe" } else { "notepad.exe" }.into()),
+                )
+            }
+            1 => {
+                let text = format!("https://example.com/page/{i}?q=剪贴板历史&lang=zh-CN");
+                CapturedItem::text(
+                    make_text_preview(&text, 200),
+                    text.clone(),
+                    hash_str(&text),
+                    Some("msedge.exe".into()),
+                )
+            }
+            2 => {
+                let text = format!("SELECT id, preview FROM items WHERE id = {i};");
+                CapturedItem::text(text.clone(), text.clone(), hash_str(&text), Some("ssms.exe".into()))
+            }
+            3 => {
+                let n = (i % 4) + 1;
+                let entries: Vec<PathEntry> = (0..n)
+                    .map(|k| PathEntry {
+                        path: format!(r"C:\Users\demo\Documents\项目{i}\报告-{k}.docx"),
+                        is_dir: false,
+                    })
+                    .collect();
+                let text = cliphist::core::payload::join_paths_text(
+                    &entries.iter().map(|e| e.path.clone()).collect::<Vec<_>>(),
+                );
+                CapturedItem::files(
+                    make_files_preview(&entries),
+                    entries.clone(),
+                    text,
+                    hash_paths(&entries),
+                    Some("explorer.exe".into()),
+                )
+            }
+            _ => {
+                let text = format!("D:\\code\\demo\\src\\module_{i}.rs:{}: 这里是较长的代码片段，用来看正文回退搜索是否有效。", i * 7);
+                CapturedItem::text(
+                    make_text_preview(&text, 200),
+                    text.clone(),
+                    hash_str(&text),
+                    Some("Code.exe".into()),
+                )
+            }
+        };
+        if store.upsert(&item, None, base + (i as i64) * 60_000).is_ok() {
+            inserted += 1;
+        }
+    }
+    let elapsed = start.elapsed();
+
+    // 顺手量一下列表查询：这是弹窗打开时唯一会碰库的操作
+    let q_start = std::time::Instant::now();
+    let rows = store.list_page("", 300).unwrap_or_default();
+    let q_elapsed = q_start.elapsed();
+    let s_start = std::time::Instant::now();
+    let _ = store.list_page("报告", 300).unwrap_or_default();
+    let s_elapsed = s_start.elapsed();
+
+    let (total, bytes) = store.stats().unwrap_or((0, 0));
+    println!("已写入 {inserted} 条（耗时 {elapsed:?}）");
+    println!("库内共 {total} 条，data.db {} KB", bytes / 1024);
+    println!(
+        "查询最近 300 条：{:?}（返回 {} 条）；关键字搜索：{:?}",
+        q_elapsed,
+        rows.len(),
+        s_elapsed
+    );
+
+    report.push(format!("inserted={inserted}"));
+    report.push(format!("total={total}"));
+    report.push(format!("db_kb={}", bytes / 1024));
+    report.push(format!("fill_ms={}", elapsed.as_millis()));
+    report.push(format!("query_us={}", q_elapsed.as_micros()));
+    report.push(format!("query_rows={}", rows.len()));
+    report.push(format!("search_us={}", s_elapsed.as_micros()));
+
+    if let Some(path) = log_path {
+        let text = report.join("\n") + "\n";
+        match std::fs::write(&path, text) {
+            Ok(()) => println!("结果已写入 {path}"),
+            Err(e) => eprintln!("无法写入结果文件 {path}：{e}"),
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// 剪贴板自检：用**正式代码**把四种格式真写进系统剪贴板再读回来。
+///
+/// 这是唯一能覆盖 `OpenClipboard` / `SetClipboardData` / `CF_HDROP` / `CF_DIBV5`
+/// 这些"只有真调 Win32 才知道对不对"的路径的手段。单元测试只能覆盖字节布局。
+///
+/// 注意：会覆盖当前剪贴板内容。在没有交互式桌面会话的环境（服务、受限沙箱）里
+/// `OpenClipboard` 会失败，此时明确报告"剪贴板不可用"并以专用退出码结束 ——
+/// 那是环境限制，不是程序缺陷。
+fn selftest_clipboard() -> ExitCode {
+    use cliphist::image::dib::rgba_to_dibv5;
+    use cliphist::image::thumb::encode_png_rgba;
+    use cliphist::win::clipboard::{self, Content, Limits, Payload};
+
+    let hwnd: windows_sys::Win32::Foundation::HWND = std::ptr::null_mut();
+    let limits = Limits::default();
+    let mut fails: Vec<String> = Vec::new();
+    macro_rules! check {
+        ($name:expr, $cond:expr) => {
+            if $cond {
+                println!("  PASS  {}", $name);
+            } else {
+                println!("  FAIL  {}", $name);
+                fails.push($name.to_string());
+            }
+        };
+    }
+
+    println!("ClipHist 剪贴板自检（{}）", cliphist::VERSION);
+
+    // ① 探针：先确认剪贴板到底能不能用
+    let probe = format!("ClipHist 剪贴板自检 {}", std::process::id());
+    if let Err(e) = clipboard::write(hwnd, &Payload::Text(&probe)) {
+        println!("  剪贴板不可用：{e}");
+        println!();
+        println!("当前会话没有可用的剪贴板（常见于服务/受限沙箱/无交互桌面）。");
+        println!("这不代表程序有缺陷 —— 请在正常桌面会话里重新运行本命令。");
+        return ExitCode::from(8);
+    }
+
+    // ② 文本往返
+    match clipboard::read(hwnd, &limits) {
+        Content::Text(t) => check!("文本往返一致", t == probe),
+        other => {
+            println!("      实际读到：{other:?}");
+            check!("文本往返一致", false);
+        }
+    }
+
+    // ③ 文件往返（CF_HDROP + Preferred DropEffect）
+    let dir = cliphist::win::paths::exe_dir();
+    let paths = vec![
+        dir.join("ClipHist.exe").display().to_string(),
+        dir.display().to_string(),
+    ];
+    check!(
+        "写入文件到剪贴板",
+        clipboard::write(
+            hwnd,
+            &Payload::Files {
+                paths: &paths,
+                is_cut: false
+            }
+        )
+        .is_ok()
+    );
+    match clipboard::read(hwnd, &limits) {
+        Content::Files { paths: back, is_cut } => {
+            check!("文件路径往返一致", back == paths);
+            check!("复制（非剪切）语义正确", !is_cut);
+        }
+        other => {
+            println!("      实际读到：{other:?}");
+            check!("文件路径往返一致", false);
+        }
+    }
+
+    // ④ 图片往返：先只给 DIBV5，验证 DIB 通道
+    let (w, h) = (48u32, 32u32);
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            rgba.push((x * 5 % 256) as u8);
+            rgba.push((y * 7 % 256) as u8);
+            rgba.push(((x + y) * 3 % 256) as u8);
+            rgba.push(255);
+        }
+    }
+    let dib = rgba_to_dibv5(w, h, &rgba).unwrap_or_default();
+    let png = encode_png_rgba(w, h, &rgba).unwrap_or_default();
+    check!(
+        "写入图片（仅 CF_DIBV5）",
+        clipboard::write(
+            hwnd,
+            &Payload::Image {
+                dibv5: &dib,
+                png: &[]
+            }
+        )
+        .is_ok()
+    );
+    match clipboard::read(hwnd, &limits) {
+        Content::Image(img) => {
+            check!("DIB 通道尺寸正确", img.width == w && img.height == h);
+            check!("DIB 通道像素一致", img.rgba == rgba);
+        }
+        other => {
+            println!("      实际读到：{other:?}");
+            check!("DIB 通道像素一致", false);
+        }
+    }
+
+    // ⑤ 图片往返：同时给 PNG，验证优先走 PNG 通道且无损
+    check!(
+        "写入图片（DIBV5 + PNG）",
+        clipboard::write(
+            hwnd,
+            &Payload::Image {
+                dibv5: &dib,
+                png: &png
+            }
+        )
+        .is_ok()
+    );
+    match clipboard::read(hwnd, &limits) {
+        Content::Image(img) => check!("PNG 通道无损", img.rgba == rgba),
+        other => {
+            println!("      实际读到：{other:?}");
+            check!("PNG 通道无损", false);
+        }
+    }
+
+    // ⑥ "请勿记录"标记必须被尊重（密码管理器的场景）
+    check!(
+        "写入带忽略标记的内容",
+        clipboard::write_registered(
+            "Clipboard Viewer Ignore",
+            &[1u8, 0, 0, 0],
+            Some("这段内容不应该被记录")
+        )
+        .is_ok()
+    );
+    match clipboard::read(hwnd, &limits) {
+        Content::Ignored => check!("忽略标记生效（不会被记录）", true),
+        other => {
+            println!("      实际读到：{other:?}");
+            check!("忽略标记生效（不会被记录）", false);
+        }
+    }
+
+    // 收尾：把剪贴板恢复成一句提示，别留下自检垃圾
+    let _ = clipboard::write(
+        hwnd,
+        &Payload::Text("ClipHist 剪贴板自检已完成，这里原本的内容已被覆盖。"),
+    );
+
+    println!();
+    if fails.is_empty() {
+        println!("剪贴板自检通过。");
+        ExitCode::SUCCESS
+    } else {
+        println!("剪贴板自检失败 {} 项：{}", fails.len(), fails.join("；"));
+        ExitCode::from(9)
+    }
 }
 
 /// 自检：不依赖桌面环境，验证存储层与图片编解码的关键路径。
