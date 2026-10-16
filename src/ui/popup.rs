@@ -12,27 +12,27 @@ use std::mem::zeroed;
 
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, GetMonitorInfoW, HBRUSH, HDC,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, WHITE_BRUSH,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, GetMonitorInfoW, MonitorFromPoint,
+    HBRUSH, HDC, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, WHITE_BRUSH,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CallWindowProcW, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, ES_AUTOHSCROLL, ES_LEFT, GetClientRect, GetCursorPos, GetWindowLongPtrW,
-    GetParent, GetWindowTextW, GetWindowTextLengthW, HWND_TOPMOST, IDC_ARROW, IsWindowVisible,
-    LoadCursorW, MoveWindow, PostMessageW, RegisterClassExW, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW,
-    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
-    ShowWindow, WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT,
-    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCCREATE, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WM_SYSKEYDOWN, WNDCLASSEXW, WNDPROC,
-    WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
+    GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
+    LoadCursorW, MoveWindow, PostMessageW, RegisterClassExW, SendMessageW, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CS_HREDRAW,
+    CS_VREDRAW, ES_AUTOHSCROLL, ES_LEFT, HWND_TOPMOST, IDC_ARROW, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW,
+    WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_DESTROY,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT,
+    WM_RBUTTONUP, WM_SETFONT, WM_SYSKEYDOWN, WNDCLASSEXW, WNDPROC, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::core::model::{ItemRow, Kind};
-use crate::ui::gdi::{self, Fonts, MemDc, ThumbCache, rect};
-use crate::ui::theme::{Metrics, color};
+use crate::ui::gdi::{self, rect, Fonts, MemDc, ThumbCache};
+use crate::ui::theme::{color, Metrics};
 use crate::ui::timefmt;
 use crate::win::strings::{from_wide_until_nul, to_wide};
 
@@ -180,7 +180,9 @@ pub enum KeyAction {
     None,
     /// 选中第 N 条（Ctrl+1..9）
     PickIndex(usize),
-    Choose { clipboard_only: bool },
+    Choose {
+        clipboard_only: bool,
+    },
     Context,
     Pin,
     Delete,
@@ -238,7 +240,7 @@ pub fn handle_key(
                 (KeyAction::Consumed, false)
             }
         }
-        0x50 if ctrl => (KeyAction::Pin, false),    // Ctrl+P 置顶
+        0x50 if ctrl => (KeyAction::Pin, false), // Ctrl+P 置顶
         0x44 if ctrl => (KeyAction::Delete, false), // Ctrl+D 删除
         _ => (KeyAction::None, false),
     }
@@ -379,7 +381,10 @@ impl PopupState {
 
         let gap = m.pad;
         let mut x = pt.x - m.width / 2;
-        x = x.clamp(work.left + gap, (work.right - m.width - gap).max(work.left + gap));
+        x = x.clamp(
+            work.left + gap,
+            (work.right - m.width - gap).max(work.left + gap),
+        );
         let mut y = pt.y + gap;
         if y + h > work.bottom - gap {
             // 下方放不下就翻到光标上方
@@ -387,17 +392,7 @@ impl PopupState {
         }
         y = y.clamp(work.top + gap, (work.bottom - h - gap).max(work.top + gap));
 
-        unsafe {
-            SetWindowPos(
-                self.hwnd,
-                HWND_TOPMOST,
-                x,
-                y,
-                m.width,
-                h,
-                SWP_SHOWWINDOW,
-            )
-        };
+        unsafe { SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, m.width, h, SWP_SHOWWINDOW) };
     }
 
     // ---------------------------------------------------------- 绘制
@@ -490,8 +485,16 @@ impl PopupState {
             }
 
             let fg = if selected { color::SEL_FG } else { color::INK };
-            let fg2 = if selected { color::SEL_FG2 } else { color::INK2 };
-            let fg3 = if selected { color::SEL_FG2 } else { color::INK3 };
+            let fg2 = if selected {
+                color::SEL_FG2
+            } else {
+                color::INK2
+            };
+            let fg3 = if selected {
+                color::SEL_FG2
+            } else {
+                color::INK3
+            };
 
             // 左侧方块：图片用它画缩略图，文本/文件画类型徽标
             let thumb_top = rc.top + (m.row_h - m.thumb) / 2;
@@ -552,8 +555,20 @@ impl PopupState {
             }
             parts.push(timefmt::relative(now, row.last_used_at));
 
-            let meta_rc = rect(text_left, top + line_h + 2, text_right, top + line_h + 2 + meta_h);
-            gdi::text(dc, self.fonts.meta, fg2, &meta_rc, &parts.join(" · "), false);
+            let meta_rc = rect(
+                text_left,
+                top + line_h + 2,
+                text_right,
+                top + line_h + 2 + meta_h,
+            );
+            gdi::text(
+                dc,
+                self.fonts.meta,
+                fg2,
+                &meta_rc,
+                &parts.join(" · "),
+                false,
+            );
 
             // 右侧：使用次数（等宽，便于竖着对齐）
             if row.use_count > 1 {
@@ -568,7 +583,13 @@ impl PopupState {
                 let cx = w - m.pad - 4;
                 let cy = rc.top + m.row_h / 2;
                 let r = (m.dpi as i32 / 48).max(2);
-                gdi::dot(dc, cx, cy, r, if selected { color::SEL_FG } else { color::PIN });
+                gdi::dot(
+                    dc,
+                    cx,
+                    cy,
+                    r,
+                    if selected { color::SEL_FG } else { color::PIN },
+                );
             }
         }
 
@@ -586,7 +607,12 @@ impl PopupState {
         let track_x = w - m.pad / 2 - m.scrollbar_w;
         gdi::fill(
             dc,
-            &rect(track_x, list_top, track_x + m.scrollbar_w, list_top + list_h),
+            &rect(
+                track_x,
+                list_top,
+                track_x + m.scrollbar_w,
+                list_top + list_h,
+            ),
             color::RULE,
         );
         let total = self.rows.len().max(1);
@@ -665,9 +691,15 @@ pub fn create(owner: HWND, hinstance: HINSTANCE) -> Option<HWND> {
 }
 
 unsafe fn state<'a>(hwnd: HWND) -> Option<&'a mut PopupState> {
-    let p = GetWindowLongPtrW(hwnd, windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA)
-        as *mut PopupState;
-    if p.is_null() { None } else { Some(&mut *p) }
+    let p = GetWindowLongPtrW(
+        hwnd,
+        windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
+    ) as *mut PopupState;
+    if p.is_null() {
+        None
+    } else {
+        Some(&mut *p)
+    }
 }
 
 /// 消息处理的结论。**先算结论、再动作**，是这个文件最重要的约定：
@@ -691,7 +723,9 @@ unsafe fn dispatch(hwnd: HWND, out: Outcome) {
     if out == Outcome::None {
         return;
     }
-    let owner = state(hwnd).map(|st| st.owner).unwrap_or(std::ptr::null_mut());
+    let owner = state(hwnd)
+        .map(|st| st.owner)
+        .unwrap_or(std::ptr::null_mut());
     match out {
         Outcome::None => {}
         Outcome::Redraw => invalidate(hwnd),
@@ -797,8 +831,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             return 0;
         }
         WM_DESTROY => {
-            let p = GetWindowLongPtrW(hwnd, windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA)
-                as *mut PopupState;
+            let p = GetWindowLongPtrW(
+                hwnd,
+                windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
+            ) as *mut PopupState;
             if !p.is_null() {
                 SetWindowLongPtrW(
                     hwnd,
@@ -832,11 +868,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     return st.well_brush as isize;
                 }
             }
-            return unsafe { windows_sys::Win32::Graphics::Gdi::GetStockObject(WHITE_BRUSH) } as isize;
+            return unsafe { windows_sys::Win32::Graphics::Gdi::GetStockObject(WHITE_BRUSH) }
+                as isize;
         }
         WM_COMMAND => {
-            let id = (wp & 0xFFFF) as usize;
-            let code = ((wp >> 16) & 0xFFFF) as usize;
+            let id = wp & 0xFFFF;
+            let code = (wp >> 16) & 0xFFFF;
             if id == EDIT_ID && code == EN_CHANGE {
                 if let Some(st) = state(hwnd) {
                     let q = read_edit_text(st.edit);
@@ -944,8 +981,10 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     if parent.is_null() {
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
-    let ptr = GetWindowLongPtrW(parent, windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA)
-        as *mut PopupState;
+    let ptr = GetWindowLongPtrW(
+        parent,
+        windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
+    ) as *mut PopupState;
     if ptr.is_null() {
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
@@ -1157,7 +1196,12 @@ mod tests {
             nav.move_by(&m, 1);
         }
         assert_eq!(nav.selected, vis + 3);
-        assert!(nav.top > 0, "选择跑到屏幕外了：top={} sel={}", nav.top, nav.selected);
+        assert!(
+            nav.top > 0,
+            "选择跑到屏幕外了：top={} sel={}",
+            nav.top,
+            nav.selected
+        );
         assert!(nav.selected < nav.top + vis);
         // 回到顶部
         nav.select(&m, 0);
@@ -1225,34 +1269,68 @@ mod tests {
     fn key_actions() {
         let m = m();
         let mut nav = ListNav::new(10);
-        assert_eq!(handle_key(&mut nav, &m, VK_ESCAPE, false, false).0, KeyAction::Close);
+        assert_eq!(
+            handle_key(&mut nav, &m, VK_ESCAPE, false, false).0,
+            KeyAction::Close
+        );
         assert_eq!(
             handle_key(&mut nav, &m, VK_RETURN, false, false).0,
-            KeyAction::Choose { clipboard_only: false }
+            KeyAction::Choose {
+                clipboard_only: false
+            }
         );
         assert_eq!(
             handle_key(&mut nav, &m, VK_RETURN, false, true).0,
-            KeyAction::Choose { clipboard_only: true }
+            KeyAction::Choose {
+                clipboard_only: true
+            }
         );
-        assert_eq!(handle_key(&mut nav, &m, VK_DOWN, false, false).0, KeyAction::Consumed);
+        assert_eq!(
+            handle_key(&mut nav, &m, VK_DOWN, false, false).0,
+            KeyAction::Consumed
+        );
         assert_eq!(nav.selected, 1);
-        assert_eq!(handle_key(&mut nav, &m, VK_END, false, false).0, KeyAction::Consumed);
+        assert_eq!(
+            handle_key(&mut nav, &m, VK_END, false, false).0,
+            KeyAction::Consumed
+        );
         assert_eq!(nav.selected, 9);
-        assert_eq!(handle_key(&mut nav, &m, VK_HOME, false, false).0, KeyAction::Consumed);
+        assert_eq!(
+            handle_key(&mut nav, &m, VK_HOME, false, false).0,
+            KeyAction::Consumed
+        );
         assert_eq!(nav.selected, 0);
         // Ctrl+3 直选第 3 条
-        assert_eq!(handle_key(&mut nav, &m, 0x33, true, false).0, KeyAction::PickIndex(2));
+        assert_eq!(
+            handle_key(&mut nav, &m, 0x33, true, false).0,
+            KeyAction::PickIndex(2)
+        );
         assert_eq!(nav.selected, 2);
         // Ctrl+9 超出总数 → 什么都不做
         let mut small = ListNav::new(3);
-        assert_eq!(handle_key(&mut small, &m, 0x39, true, false).0, KeyAction::Consumed);
+        assert_eq!(
+            handle_key(&mut small, &m, 0x39, true, false).0,
+            KeyAction::Consumed
+        );
         assert_eq!(small.selected, 0);
         // Ctrl+P / Ctrl+D
-        assert_eq!(handle_key(&mut nav, &m, 0x50, true, false).0, KeyAction::Pin);
-        assert_eq!(handle_key(&mut nav, &m, 0x44, true, false).0, KeyAction::Delete);
+        assert_eq!(
+            handle_key(&mut nav, &m, 0x50, true, false).0,
+            KeyAction::Pin
+        );
+        assert_eq!(
+            handle_key(&mut nav, &m, 0x44, true, false).0,
+            KeyAction::Delete
+        );
         // 普通字母不拦截（要留给搜索框）
-        assert_eq!(handle_key(&mut nav, &m, 0x41, false, false).0, KeyAction::None);
-        assert_eq!(handle_key(&mut nav, &m, 0x08, false, false).0, KeyAction::None);
+        assert_eq!(
+            handle_key(&mut nav, &m, 0x41, false, false).0,
+            KeyAction::None
+        );
+        assert_eq!(
+            handle_key(&mut nav, &m, 0x08, false, false).0,
+            KeyAction::None
+        );
     }
 
     #[test]

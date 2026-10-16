@@ -96,7 +96,11 @@ pub fn resolve_data_location() -> DataLocation {
 pub fn autostart_command() -> String {
     match exe_path() {
         Some(p) => format!("\"{}\" --autostart", p.display()),
-        None => format!("\"{}\\{}.exe\" --autostart", exe_dir().display(), crate::APP_NAME),
+        None => format!(
+            "\"{}\\{}.exe\" --autostart",
+            exe_dir().display(),
+            crate::APP_NAME
+        ),
     }
 }
 
@@ -135,7 +139,10 @@ mod tests {
     #[test]
     fn autostart_command_quotes_path_and_adds_flag() {
         let cmd = autostart_command();
-        assert!(cmd.starts_with('"'), "路径必须带引号，否则含空格的目录会启动失败");
+        assert!(
+            cmd.starts_with('"'),
+            "路径必须带引号，否则含空格的目录会启动失败"
+        );
         assert!(cmd.ends_with("--autostart"));
         assert!(cmd.contains(".exe"));
     }

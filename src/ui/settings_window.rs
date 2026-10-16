@@ -7,19 +7,19 @@
 use std::mem::zeroed;
 
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, HDC, InvalidateRect, PAINTSTRUCT};
+use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, HDC, PAINTSTRUCT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    GetClientRect, GetCursorPos, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, LoadCursorW,
-    PostMessageW, RegisterClassExW, SW_HIDE, SW_SHOW, SWP_SHOWWINDOW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_APP, WM_CLOSE, WM_CREATE, WM_DESTROY,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT,
-    WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_POPUP, WNDCLASSEXW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetWindowLongPtrW,
+    LoadCursorW, PostMessageW, RegisterClassExW, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, IDC_ARROW,
+    SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_APP, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_CLIPCHILDREN,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
-use crate::core::settings::{MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, PasteMode, Settings};
-use crate::ui::gdi::{self, Fonts, MemDc, rect};
-use crate::ui::theme::{Metrics, color};
+use crate::core::settings::{PasteMode, Settings, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
+use crate::ui::gdi::{self, rect, Fonts, MemDc};
+use crate::ui::theme::{color, Metrics};
 use crate::win::strings::to_wide;
 
 pub const CLASS_NAME: &str = "ClipHist.Settings";
@@ -109,13 +109,21 @@ pub fn row_at(l: &Layout, y: i32) -> Option<usize> {
         return None;
     }
     let idx = ((y - l.header_h) / l.row_h) as usize;
-    if idx < ROWS.len() { Some(idx) } else { None }
+    if idx < ROWS.len() {
+        Some(idx)
+    } else {
+        None
+    }
 }
 
 /// 鼠标落在值区的哪一半（纯函数，可单测）。
 pub fn half_at(l: &Layout, x: i32) -> Half {
     let mid = l.value_x + (l.width - l.pad - l.value_x) / 2;
-    if x < mid { Half::Decrease } else { Half::Increase }
+    if x < mid {
+        Half::Decrease
+    } else {
+        Half::Increase
+    }
 }
 
 /// 标题栏右上角的关闭按钮命中区。
@@ -400,7 +408,11 @@ impl SettingsState {
 
             let is_path = *kind == RowKind::DataPath;
             let value = rect(l.value_x, top, w - l.pad, top + l.row_h);
-            let f = if is_path { self.fonts.mono } else { self.fonts.ui };
+            let f = if is_path {
+                self.fonts.mono
+            } else {
+                self.fonts.ui
+            };
             let vcolor = match kind {
                 RowKind::Clear if self.confirm_clear => color::WARN,
                 RowKind::Hotkey if self.capturing => color::WARN,
@@ -489,13 +501,23 @@ pub fn create(owner: HWND, hinstance: HINSTANCE) -> Option<HWND> {
             std::ptr::null(),
         )
     };
-    if hwnd.is_null() { None } else { Some(hwnd) }
+    if hwnd.is_null() {
+        None
+    } else {
+        Some(hwnd)
+    }
 }
 
 unsafe fn state<'a>(hwnd: HWND) -> Option<&'a mut SettingsState> {
-    let p = GetWindowLongPtrW(hwnd, windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA)
-        as *mut SettingsState;
-    if p.is_null() { None } else { Some(&mut *p) }
+    let p = GetWindowLongPtrW(
+        hwnd,
+        windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
+    ) as *mut SettingsState;
+    if p.is_null() {
+        None
+    } else {
+        Some(&mut *p)
+    }
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -508,7 +530,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 (*cs).hwndParent
             };
             // 真正的设置值由 show() 注入，这里先放默认值占位。
-            let st = Box::new(SettingsState::new(hwnd, owner, Settings::default(), String::new()));
+            let st = Box::new(SettingsState::new(
+                hwnd,
+                owner,
+                Settings::default(),
+                String::new(),
+            ));
             SetWindowLongPtrW(
                 hwnd,
                 windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
@@ -518,8 +545,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_CREATE => return 0,
         WM_DESTROY => {
-            let p = GetWindowLongPtrW(hwnd, windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA)
-                as *mut SettingsState;
+            let p = GetWindowLongPtrW(
+                hwnd,
+                windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
+            ) as *mut SettingsState;
             if !p.is_null() {
                 SetWindowLongPtrW(
                     hwnd,
@@ -573,23 +602,15 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 }
                 InvalidateRect(hwnd, std::ptr::null(), 0);
             }
-            match out {
-                ClickResult::Changed => {
-                    if !owner.is_null() {
-                        PostMessageW(owner, WM_SETTINGS_CHANGED, 0, 0);
-                    }
-                }
-                ClickResult::Clear => {
-                    if !owner.is_null() {
-                        PostMessageW(owner, WM_SETTINGS_CLEAR, 0, 0);
-                    }
-                }
-                ClickResult::OpenFolder => {
-                    if !owner.is_null() {
-                        PostMessageW(owner, WM_SETTINGS_OPEN_FOLDER, 0, 0);
-                    }
-                }
-                _ => {}
+            // 三种结果都只是"给控制器发一条消息"，用一个映射收掉重复。
+            let outgoing = match out {
+                ClickResult::Changed => Some(WM_SETTINGS_CHANGED),
+                ClickResult::Clear => Some(WM_SETTINGS_CLEAR),
+                ClickResult::OpenFolder => Some(WM_SETTINGS_OPEN_FOLDER),
+                _ => None,
+            };
+            if let (Some(msg), false) = (outgoing, owner.is_null()) {
+                PostMessageW(owner, msg, 0, 0);
             }
             return 0;
         }
@@ -620,7 +641,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_CLOSE => {
             ShowWindow(hwnd, SW_HIDE);
-            let owner = state(hwnd).map(|st| st.owner).unwrap_or(std::ptr::null_mut());
+            let owner = state(hwnd)
+                .map(|st| st.owner)
+                .unwrap_or(std::ptr::null_mut());
             if !owner.is_null() {
                 PostMessageW(owner, WM_SETTINGS_CLOSED, 0, 0);
             }
@@ -665,7 +688,8 @@ pub fn take_settings(hwnd: HWND) -> Option<Settings> {
 }
 
 pub fn is_visible(hwnd: HWND) -> bool {
-    !hwnd.is_null() && unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd) } != 0
+    !hwnd.is_null()
+        && unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd) } != 0
 }
 
 pub fn hide(hwnd: HWND) {
@@ -688,7 +712,11 @@ pub fn toggle(hwnd: HWND, values: Settings, data_path: &str) {
 }
 
 fn on_off(v: bool) -> String {
-    if v { "开".to_string() } else { "关".to_string() }
+    if v {
+        "开".to_string()
+    } else {
+        "关".to_string()
+    }
 }
 
 fn loword(lp: LPARAM) -> i32 {
@@ -713,7 +741,10 @@ mod tests {
         assert_eq!(l.row_top(0), l.header_h);
         assert_eq!(l.row_top(1) - l.row_top(0), l.row_h);
         let last_bottom = l.row_top(ROWS.len() - 1) + l.row_h;
-        assert!(last_bottom <= l.height() - l.footer_h + 1, "最后一行必须落在页脚之上");
+        assert!(
+            last_bottom <= l.height() - l.footer_h + 1,
+            "最后一行必须落在页脚之上"
+        );
         // 所有行的标签都不能压到值区
         assert!(l.value_x > l.pad && l.value_x < l.width);
     }
@@ -845,9 +876,17 @@ mod tests {
             status: None,
         };
         let idx = ROWS.iter().position(|r| *r == RowKind::Clear).unwrap();
-        assert_eq!(st.click_row(idx, 300), ClickResult::Redraw, "第一次只是进入确认态");
+        assert_eq!(
+            st.click_row(idx, 300),
+            ClickResult::Redraw,
+            "第一次只是进入确认态"
+        );
         assert!(st.confirm_clear);
-        assert_eq!(st.click_row(idx, 300), ClickResult::Clear, "第二次才真的清空");
+        assert_eq!(
+            st.click_row(idx, 300),
+            ClickResult::Clear,
+            "第二次才真的清空"
+        );
         assert!(!st.confirm_clear);
     }
 

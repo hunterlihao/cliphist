@@ -4,7 +4,7 @@
 
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey,
+    RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT,
 };
 
 /// 主热键 id。

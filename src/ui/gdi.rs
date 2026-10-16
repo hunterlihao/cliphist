@@ -6,18 +6,18 @@
 
 use windows_sys::Win32::Foundation::{COLORREF, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, AlphaBlend, BLENDFUNCTION, BitBlt, CLEARTYPE_QUALITY,
-    CLIP_DEFAULT_PRECIS, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
-    CreateFontW, CreatePen, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DIB_RGB_COLORS,
-    DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteDC,
-    DeleteObject, DrawTextW, FF_DONTCARE, FW_BOLD, FW_NORMAL, FillRect, GetDC, GetStockObject,
-    GetTextExtentPoint32W, GetTextMetricsW, HBRUSH, HBITMAP, HDC, HFONT, HGDIOBJ, HPEN,
-    OUT_DEFAULT_PRECIS, PS_SOLID, ReleaseDC, RoundRect, SRCCOPY, SelectObject, SetBkMode,
-    SetTextColor, TEXTMETRICW, TRANSPARENT, VARIABLE_PITCH,
+    AlphaBlend, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW,
+    CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, FillRect, GetDC,
+    GetStockObject, GetTextExtentPoint32W, GetTextMetricsW, ReleaseDC, RoundRect, SelectObject,
+    SetBkMode, SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, CLEARTYPE_QUALITY,
+    CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DIB_RGB_COLORS, DT_CENTER,
+    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD,
+    FW_NORMAL, HBITMAP, HBRUSH, HDC, HFONT, HGDIOBJ, HPEN, OUT_DEFAULT_PRECIS, PS_SOLID, SRCCOPY,
+    TEXTMETRICW, TRANSPARENT, VARIABLE_PITCH,
 };
 
 use crate::image::thumb::decode_png_rgba;
-use crate::ui::theme::{Metrics, font};
+use crate::ui::theme::{font, Metrics};
 use crate::win::strings::to_wide;
 
 const BI_RGB: u32 = 0;
@@ -207,7 +207,11 @@ pub fn fill(dc: HDC, rc: &RECT, color: COLORREF) {
 /// 1px 矩形描边（画在 `rc` 内侧）。
 pub fn frame(dc: HDC, rc: &RECT, color: COLORREF) {
     fill(dc, &rect(rc.left, rc.top, rc.right, rc.top + 1), color);
-    fill(dc, &rect(rc.left, rc.bottom - 1, rc.right, rc.bottom), color);
+    fill(
+        dc,
+        &rect(rc.left, rc.bottom - 1, rc.right, rc.bottom),
+        color,
+    );
     fill(dc, &rect(rc.left, rc.top, rc.left + 1, rc.bottom), color);
     fill(dc, &rect(rc.right - 1, rc.top, rc.right, rc.bottom), color);
 }
@@ -227,7 +231,15 @@ pub fn round_fill(dc: HDC, rc: &RECT, color: COLORREF, radius: i32) {
         let pen: HPEN = CreatePen(PS_SOLID, 1, color);
         let ob = SelectObject(dc, brush as HGDIOBJ);
         let op = SelectObject(dc, pen as HGDIOBJ);
-        RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, radius * 2, radius * 2);
+        RoundRect(
+            dc,
+            rc.left,
+            rc.top,
+            rc.right,
+            rc.bottom,
+            radius * 2,
+            radius * 2,
+        );
         SelectObject(dc, ob);
         SelectObject(dc, op);
         DeleteObject(brush as HGDIOBJ);
@@ -403,9 +415,7 @@ impl ThumbCache {
             SourceConstantAlpha: 255,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
-        unsafe {
-            AlphaBlend(dc, dx, dy, dw, dh, t.hdc, 0, 0, t.w, t.h, blend) != 0
-        }
+        unsafe { AlphaBlend(dc, dx, dy, dw, dh, t.hdc, 0, 0, t.w, t.h, blend) != 0 }
     }
 }
 
@@ -450,7 +460,14 @@ fn create_thumb(id: i64, img: &crate::core::model::ImageData) -> Option<Thumb> {
             }],
         };
         let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-        let bmp = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+        let bmp = CreateDIBSection(
+            hdc,
+            &bmi,
+            DIB_RGB_COLORS,
+            &mut bits,
+            std::ptr::null_mut(),
+            0,
+        );
         if bmp.is_null() || bits.is_null() {
             DeleteDC(hdc);
             return None;

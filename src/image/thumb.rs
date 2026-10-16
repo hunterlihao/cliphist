@@ -36,8 +36,8 @@ pub fn downscale_rgba(src: &ImageData, max_edge: u32) -> ImageData {
             for y in y0..y1.min(src.height as u64) {
                 for x in x0..x1.min(src.width as u64) {
                     let o = ((y as u32 * src.width + x as u32) * 4) as usize;
-                    for c in 0..4 {
-                        acc[c] += src.rgba[o + c] as u32;
+                    for (c, a) in acc.iter_mut().enumerate() {
+                        *a += src.rgba[o + c] as u32;
                     }
                     n += 1;
                 }
@@ -46,8 +46,8 @@ pub fn downscale_rgba(src: &ImageData, max_edge: u32) -> ImageData {
             if n == 0 {
                 continue;
             }
-            for c in 0..4 {
-                dst[o + c] = ((acc[c] + n / 2) / n) as u8;
+            for (c, a) in acc.iter().enumerate() {
+                dst[o + c] = ((a + n / 2) / n) as u8;
             }
         }
     }
@@ -137,7 +137,11 @@ mod tests {
                 rgba.push(255);
             }
         }
-        ImageData { width: w, height: h, rgba }
+        ImageData {
+            width: w,
+            height: h,
+            rgba,
+        }
     }
 
     #[test]
@@ -194,7 +198,11 @@ mod tests {
                 rgba[o + 3] = 255;
             }
         }
-        let src = ImageData { width: 4, height: 4, rgba };
+        let src = ImageData {
+            width: 4,
+            height: 4,
+            rgba,
+        };
         let small = downscale_rgba(&src, 2);
         assert_eq!((small.width, small.height), (2, 2));
         assert_eq!(small.rgba[0], 0, "左格覆盖纯黑块");
@@ -203,7 +211,11 @@ mod tests {
         // 真正验证"平均"：2x1（黑+白）→ 1x1 必须是 128 而不是任取一边。
         let mut half = vec![0u8, 0, 0, 255];
         half.extend_from_slice(&[255, 255, 255, 255]);
-        let src = ImageData { width: 2, height: 1, rgba: half };
+        let src = ImageData {
+            width: 2,
+            height: 1,
+            rgba: half,
+        };
         let one = downscale_rgba(&src, 1);
         assert_eq!((one.width, one.height), (1, 1));
         assert_eq!(one.rgba[0], 128, "非整块的边界必须做平均，不能取最近邻");
@@ -212,7 +224,11 @@ mod tests {
         let mut three = vec![0u8, 0, 0, 255];
         three.extend_from_slice(&[255, 255, 255, 255]);
         three.extend_from_slice(&[255, 255, 255, 255]);
-        let src = ImageData { width: 3, height: 1, rgba: three };
+        let src = ImageData {
+            width: 3,
+            height: 1,
+            rgba: three,
+        };
         let one = downscale_rgba(&src, 1);
         assert_eq!(one.rgba[0], 170, "(0+255+255+1)/3 = 170");
     }
@@ -230,7 +246,11 @@ mod tests {
 
     #[test]
     fn thumbnail_of_degenerate_image_is_none() {
-        let empty = ImageData { width: 0, height: 0, rgba: Vec::new() };
+        let empty = ImageData {
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+        };
         assert!(make_thumbnail_png(&empty).is_none());
     }
 }

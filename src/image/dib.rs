@@ -128,7 +128,8 @@ pub fn dib_to_rgba(bytes: &[u8], info: &DibInfo) -> Option<(u32, u32, Vec<u8>)> 
     let h = info.height.unsigned_abs() as usize;
     let top_down = info.height < 0;
     let bpp = info.bit_count as usize / 8;
-    let stride = ((w * info.bit_count as usize + 31) / 32) * 4;
+    // 每行按 4 字节对齐（DIB 的行步长规则）。
+    let stride = (info.bit_count as usize * w).div_ceil(32) * 4;
     let needed = info.pixel_offset.checked_add(stride.checked_mul(h)?)?;
     if needed > bytes.len() {
         return None;
@@ -288,7 +289,11 @@ mod tests {
         assert_eq!(info.bit_count, 24);
         let (w, h, rgba) = dib_to_rgba(&b, &info).unwrap();
         assert_eq!((w, h), (2, 2));
-        assert_eq!(&rgba[0..4], &[255, 0, 0, 255], "红色，且 alpha 补齐为不透明");
+        assert_eq!(
+            &rgba[0..4],
+            &[255, 0, 0, 255],
+            "红色，且 alpha 补齐为不透明"
+        );
         assert_eq!(&rgba[4..8], &[0, 255, 0, 255], "绿色");
         assert_eq!(&rgba[8..12], &[0, 0, 255, 255], "蓝色（第二行第一列）");
     }

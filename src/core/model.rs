@@ -52,7 +52,13 @@ pub struct ImageData {
 
 impl std::fmt::Debug for ImageData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ImageData({}x{}, {} bytes)", self.width, self.height, self.rgba.len())
+        write!(
+            f,
+            "ImageData({}x{}, {} bytes)",
+            self.width,
+            self.height,
+            self.rgba.len()
+        )
     }
 }
 
@@ -114,12 +120,7 @@ impl CapturedItem {
         }
     }
 
-    pub fn image(
-        preview: String,
-        image: ImageData,
-        hash: u64,
-        source_exe: Option<String>,
-    ) -> Self {
+    pub fn image(preview: String, image: ImageData, hash: u64, source_exe: Option<String>) -> Self {
         let byte_len = image.rgba.len() as i64;
         Self {
             kind: Kind::Image,

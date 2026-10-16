@@ -11,7 +11,7 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -29,16 +29,18 @@ use crate::core::hash::hash_str;
 use crate::core::model::{CapturedItem, ItemRow, Kind, PathEntry};
 use crate::core::payload::{hash_image, hash_paths, join_paths_text};
 use crate::core::settings::{PasteMode, Settings};
-use crate::core::store::{Store, now_ms};
+use crate::core::store::{now_ms, Store};
 use crate::image::dib::rgba_to_dibv5;
-use crate::image::thumb::{decode_png_rgba, downscale_rgba, encode_png_rgba, make_thumbnail_png, needs_downscale};
+use crate::image::thumb::{
+    decode_png_rgba, downscale_rgba, encode_png_rgba, make_thumbnail_png, needs_downscale,
+};
 use crate::ui::{popup, settings_window};
 use crate::win::clipboard::{self, Content, Limits, Payload};
+use crate::win::hotkey;
 use crate::win::paths::{self, DataLocation};
 use crate::win::process;
 use crate::win::registry;
 use crate::win::tray::{self, MenuItem, Tray};
-use crate::win::hotkey;
 
 /// 控制器窗口类名（单实例唤醒时用它找窗口）。
 pub const CLASS_NAME: &str = "ClipHist.Ctl";
@@ -124,15 +126,13 @@ fn writer_loop(rx: Receiver<DbMsg>, db_path: PathBuf, mut settings: Settings, no
     backfill_thumbs(&mut store, notify);
 
     let mut since_prune = 0usize;
-    'outer: loop {
-        let Ok(first) = rx.recv() else { break };
+    let mut quitting = false;
+    while let Ok(first) = rx.recv() {
         let mut batch = vec![first];
         // 一次最多处理 32 条，避免长时间不响应设置变更/关机消息。
         while batch.len() < 32 {
-            match rx.try_recv() {
-                Ok(m) => batch.push(m),
-                Err(_) => break,
-            }
+            let Ok(m) = rx.try_recv() else { break };
+            batch.push(m);
         }
 
         for msg in batch {
@@ -162,10 +162,15 @@ fn writer_loop(rx: Receiver<DbMsg>, db_path: PathBuf, mut settings: Settings, no
                     let _ = store.prune(&settings, now_ms());
                 }
                 DbMsg::Shutdown => {
+                    // 退出前把空闲页还给系统，便携版（U 盘）上这一步尤其值。
                     let _ = store.incremental_vacuum();
-                    break 'outer;
+                    quitting = true;
+                    break;
                 }
             }
+        }
+        if quitting {
+            break;
         }
     }
 }
@@ -214,10 +219,7 @@ fn handle_ingest(store: &mut Store, mut item: CapturedItem, settings: &Settings,
 }
 
 /// 图片入库前按设置决定是否降采样；返回编码后的 PNG。
-fn encode_image_for_store(
-    img: &crate::core::model::ImageData,
-    max_edge: u32,
-) -> Option<Vec<u8>> {
+fn encode_image_for_store(img: &crate::core::model::ImageData, max_edge: u32) -> Option<Vec<u8>> {
     if needs_downscale(img.width, img.height, max_edge) {
         let small = downscale_rgba(img, max_edge);
         encode_png_rgba(small.width, small.height, &small.rgba).ok()
@@ -234,7 +236,9 @@ fn backfill_thumbs(store: &mut Store, notify: HWND) {
         return;
     }
     for (id, png) in pending {
-        let thumb = decode_png_rgba(&png).ok().and_then(|img| make_thumbnail_png(&img));
+        let thumb = decode_png_rgba(&png)
+            .ok()
+            .and_then(|img| make_thumbnail_png(&img));
         let ok = thumb.is_some();
         let _ = store.set_thumb(id, thumb);
         if ok && !notify.is_null() {
@@ -272,9 +276,7 @@ pub fn to_captured(
                 return IngestDecision::Skip("内容过大，未记录");
             }
             let preview = make_text_preview(&text, PREVIEW_CHARS);
-            IngestDecision::Store(Box::new(CapturedItem::text(
-                preview, text, 0, source_exe,
-            )))
+            IngestDecision::Store(Box::new(CapturedItem::text(preview, text, 0, source_exe)))
         }
         Content::Files { paths, is_cut: _ } => {
             // 剪切/复制不影响去重：同一批文件就是同一条历史。
@@ -565,13 +567,22 @@ impl App {
         let first_path = files.first().map(|f| f.path.clone());
 
         let mut items = vec![
-            MenuItem::new(CMD_ITEM_PIN, if pinned { "取消置顶" } else { "置顶（常用）" }),
+            MenuItem::new(
+                CMD_ITEM_PIN,
+                if pinned {
+                    "取消置顶"
+                } else {
+                    "置顶（常用）"
+                },
+            ),
             MenuItem::new(CMD_ITEM_DELETE, "删除这条"),
         ];
         if kind == Some(Kind::Files) {
             items.push(MenuItem::separator());
             items.push(MenuItem::new(CMD_ITEM_OPEN, "打开").enabled(first_path.is_some()));
-            items.push(MenuItem::new(CMD_ITEM_REVEAL, "打开所在文件夹").enabled(first_path.is_some()));
+            items.push(
+                MenuItem::new(CMD_ITEM_REVEAL, "打开所在文件夹").enabled(first_path.is_some()),
+            );
             items.push(MenuItem::new(CMD_ITEM_COPY_PATH, "复制路径"));
         }
 
@@ -692,8 +703,12 @@ impl App {
             } else {
                 // 新组合键被占用：退回旧热键，并把设置改回去 ——
                 // 否则用户会处于"既没有新热键、也没有旧热键"的状态。
-                self.hotkey_ok =
-                    hotkey::register(self.hwnd, hotkey::HOTKEY_SHOW, prev.hotkey_mods, prev.hotkey_vk);
+                self.hotkey_ok = hotkey::register(
+                    self.hwnd,
+                    hotkey::HOTKEY_SHOW,
+                    prev.hotkey_mods,
+                    prev.hotkey_vk,
+                );
                 self.settings.hotkey_mods = prev.hotkey_mods;
                 self.settings.hotkey_vk = prev.hotkey_vk;
                 self.balloon(
@@ -719,7 +734,8 @@ impl App {
         if let Err(e) = self.settings.save(&self.read) {
             self.balloon("设置保存失败", &e.to_string(), true);
         }
-        self.writer.send(DbMsg::Settings(Box::new(self.settings.clone())));
+        self.writer
+            .send(DbMsg::Settings(Box::new(self.settings.clone())));
         let tip = self.tray_tooltip();
         if let Some(tray) = &mut self.tray {
             tray.set_tooltip(&tip);
@@ -782,7 +798,11 @@ pub fn create(hinstance: HINSTANCE) -> Option<HWND> {
             std::ptr::null(),
         )
     };
-    if hwnd.is_null() { None } else { Some(hwnd) }
+    if hwnd.is_null() {
+        None
+    } else {
+        Some(hwnd)
+    }
 }
 
 /// 初始化运行时（托盘、热键、剪贴板监听）。`autostart` 时首启不弹气泡。
@@ -822,7 +842,9 @@ pub fn init_runtime(hwnd: HWND, autostart: bool) {
         }
         // 单实例唤醒消息
         app.wake_msg = unsafe {
-            RegisterWindowMessageW(crate::win::strings::to_wide(crate::win::single_instance::WAKE_MESSAGE).as_ptr())
+            RegisterWindowMessageW(
+                crate::win::strings::to_wide(crate::win::single_instance::WAKE_MESSAGE).as_ptr(),
+            )
         };
         let tip = app.tray_tooltip();
         if let Some(tray) = &mut app.tray {
@@ -1026,7 +1048,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             APP.with(|c| {
                 if let Ok(mut g) = c.try_borrow_mut() {
                     if let Some(app) = g.as_mut() {
-                        if let Some(new_settings) = settings_window::take_settings(app.settings_hwnd) {
+                        if let Some(new_settings) =
+                            settings_window::take_settings(app.settings_hwnd)
+                        {
                             app.apply_settings(new_settings);
                         }
                     }
@@ -1083,7 +1107,10 @@ fn shell_open(target: &str, params: Option<&str>) {
             std::ptr::null_mut(),
             op.as_ptr(),
             file.as_ptr(),
-            params.as_ref().map(|p| p.as_ptr()).unwrap_or(std::ptr::null()),
+            params
+                .as_ref()
+                .map(|p| p.as_ptr())
+                .unwrap_or(std::ptr::null()),
             std::ptr::null(),
             SW_SHOWNORMAL,
         )
@@ -1102,10 +1129,17 @@ fn reveal_in_explorer(path: &str) {
 
 /// 无法继续时的最后手段：用系统消息框把原因说清楚。
 fn show_error(text: &str) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
     let title = crate::win::strings::to_wide(crate::APP_TITLE);
     let body = crate::win::strings::to_wide(text);
-    unsafe { MessageBoxW(std::ptr::null_mut(), body.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR) };
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        )
+    };
 }
 
 #[cfg(test)]
@@ -1120,7 +1154,11 @@ mod tests {
     #[test]
     fn text_content_becomes_item_with_preview() {
         let long = "行".repeat(500);
-        let d = to_captured(Content::Text(long.clone()), Some("notepad.exe".into()), &limits());
+        let d = to_captured(
+            Content::Text(long.clone()),
+            Some("notepad.exe".into()),
+            &limits(),
+        );
         let IngestDecision::Store(item) = d else {
             panic!("应当入库");
         };
@@ -1140,7 +1178,10 @@ mod tests {
         let mut l = limits();
         l.max_text_bytes = 10;
         let d = to_captured(Content::Text("0123456789ABC".into()), None, &l);
-        assert!(matches!(d, IngestDecision::Skip(_)), "超限必须拒绝，不能悄悄截断");
+        assert!(
+            matches!(d, IngestDecision::Skip(_)),
+            "超限必须拒绝，不能悄悄截断"
+        );
     }
 
     #[test]
@@ -1180,7 +1221,10 @@ mod tests {
         assert!(item.files[1].is_dir, "工作区根目录应当是目录");
         assert!(item.preview.contains("Cargo.toml"));
         assert!(item.preview.contains('\\'), "目录名要带反斜杠以示区分");
-        assert_eq!(item.text.as_deref(), Some(format!("{file}\r\n{dir}").as_str()));
+        assert_eq!(
+            item.text.as_deref(),
+            Some(format!("{file}\r\n{dir}").as_str())
+        );
         let mut item = *item;
         finalize_hash(&mut item);
         assert_ne!(item.hash, 0);
@@ -1203,7 +1247,7 @@ mod tests {
         assert_eq!(item.img_h, 3);
         assert_eq!(item.byte_len, 4 * 3 * 4);
         finalize_hash(&mut item);
-        let expect = hash_image(4, 3, &vec![200u8; 48]);
+        let expect = hash_image(4, 3, &[200u8; 48]);
         assert_eq!(item.hash, expect);
     }
 

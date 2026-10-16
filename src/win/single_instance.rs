@@ -3,7 +3,7 @@
 //! 用 `Local\` 前缀而不是 `Global\`：每个登录会话一个实例才符合直觉
 //! （多用户/远程桌面下互不打架）。
 
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     FindWindowW, PostMessageW, RegisterWindowMessageW,

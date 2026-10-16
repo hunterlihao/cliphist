@@ -7,19 +7,19 @@ use std::mem::zeroed;
 
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateCompatibleDC, CreateDIBSection,
-    CreateSolidBrush, DIB_RGB_COLORS, DeleteDC, DeleteObject, FillRect, GetDC, GetStockObject,
-    HGDIOBJ, NULL_PEN, RGBQUAD, ReleaseDC, RoundRect, SelectObject,
+    CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateSolidBrush, DeleteDC, DeleteObject,
+    FillRect, GetDC, GetStockObject, ReleaseDC, RoundRect, SelectObject, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ, NULL_PEN, RGBQUAD,
 };
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_ERROR, NIIF_INFO,
-    NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICONDATAW,
-    NOTIFYICON_VERSION_4, NOTIFY_ICON_INFOTIP_FLAGS, Shell_NotifyIconW,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_ERROR,
+    NIIF_INFO, NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICONDATAW,
+    NOTIFYICON_VERSION_4, NOTIFY_ICON_INFOTIP_FLAGS,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
-    GetSystemMetrics, HICON, ICONINFO, IDI_APPLICATION, IMAGE_ICON, LR_SHARED, LoadImageW,
-    SM_CXSMICON, SetForegroundWindow, TrackPopupMenu, WM_APP,
+    GetSystemMetrics, LoadImageW, SetForegroundWindow, TrackPopupMenu, HICON, ICONINFO,
+    IDI_APPLICATION, IMAGE_ICON, LR_SHARED, SM_CXSMICON, WM_APP,
 };
 
 use crate::win::strings::copy_fixed;
@@ -256,7 +256,11 @@ pub fn load_stock_icon() -> HICON {
 
 fn small_icon_size() -> i32 {
     let s = unsafe { GetSystemMetrics(SM_CXSMICON) };
-    if s <= 0 { 16 } else { s }
+    if s <= 0 {
+        16
+    } else {
+        s
+    }
 }
 
 /// 运行时绘制托盘图标：一张浅色"卡片 + 夹子 + 两行文字"，在高对比主题下也看得清。
@@ -302,7 +306,14 @@ pub fn create_app_icon() -> Option<HICON> {
         };
 
         let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-        let color_bmp = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+        let color_bmp = CreateDIBSection(
+            mem,
+            &bmi,
+            DIB_RGB_COLORS,
+            &mut bits,
+            std::ptr::null_mut(),
+            0,
+        );
         if color_bmp.is_null() || bits.is_null() {
             DeleteDC(mem);
             ReleaseDC(std::ptr::null_mut(), screen);
@@ -329,7 +340,15 @@ pub fn create_app_icon() -> Option<HICON> {
         // 卡片本体
         let card = CreateSolidBrush(rgb(232, 236, 242));
         let old_brush = SelectObject(mem, card as HGDIOBJ);
-        RoundRect(mem, px(0.08), px(0.16), px(0.92), px(0.94), px(0.18), px(0.18));
+        RoundRect(
+            mem,
+            px(0.08),
+            px(0.16),
+            px(0.92),
+            px(0.94),
+            px(0.18),
+            px(0.18),
+        );
         SelectObject(mem, old_brush);
         DeleteObject(card as HGDIOBJ);
 
@@ -349,7 +368,10 @@ pub fn create_app_icon() -> Option<HICON> {
         // 两行"文字"
         let line = CreateSolidBrush(rgb(122, 132, 148));
         let old_brush = SelectObject(mem, line as HGDIOBJ);
-        for (x0, x1, y0, y1) in [(0.24f32, 0.76f32, 0.42f32, 0.54f32), (0.24, 0.66, 0.64, 0.76)] {
+        for (x0, x1, y0, y1) in [
+            (0.24f32, 0.76f32, 0.42f32, 0.54f32),
+            (0.24, 0.66, 0.64, 0.76),
+        ] {
             let r = RECT {
                 left: px(x0),
                 top: px(y0),
@@ -384,9 +406,15 @@ pub fn create_app_icon() -> Option<HICON> {
 
         // AND 掩码：全 0（形状完全交给 alpha 通道）。CreateBitmap 不保证清零，
         // 所以显式给一块全 0 缓冲（1bpp，行按 WORD 对齐，自下而上）。
-        let stride = ((size as usize + 15) / 16) * 2;
+        let stride = (size as usize).div_ceil(16) * 2;
         let mask_bits = vec![0u8; stride * size as usize];
-        let mask_bmp = CreateBitmap(size, size, 1, 1, mask_bits.as_ptr() as *const core::ffi::c_void);
+        let mask_bmp = CreateBitmap(
+            size,
+            size,
+            1,
+            1,
+            mask_bits.as_ptr() as *const core::ffi::c_void,
+        );
 
         let info = ICONINFO {
             fIcon: 1,
@@ -402,7 +430,11 @@ pub fn create_app_icon() -> Option<HICON> {
         DeleteDC(mem);
         ReleaseDC(std::ptr::null_mut(), screen);
 
-        if icon.is_null() { None } else { Some(icon) }
+        if icon.is_null() {
+            None
+        } else {
+            Some(icon)
+        }
     }
 }
 

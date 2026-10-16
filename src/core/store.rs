@@ -85,11 +85,9 @@ pub enum OpenFailure {
 impl std::fmt::Display for OpenFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OpenFailure::Corrupt { path, detail } => write!(
-                f,
-                "数据文件已损坏：{}\n原因：{detail}",
-                path.display()
-            ),
+            OpenFailure::Corrupt { path, detail } => {
+                write!(f, "数据文件已损坏：{}\n原因：{detail}", path.display())
+            }
             OpenFailure::Unavailable { path, detail } => write!(
                 f,
                 "无法打开数据文件：{}\n原因：{detail}\n\
@@ -107,7 +105,10 @@ impl std::error::Error for OpenFailure {}
 fn classify(path: &Path, e: rusqlite::Error) -> OpenFailure {
     if let rusqlite::Error::SqliteFailure(err, ref msg) = e {
         use rusqlite::ErrorCode;
-        if matches!(err.code, ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt) {
+        if matches!(
+            err.code,
+            ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt
+        ) {
             return OpenFailure::Corrupt {
                 path: path.to_path_buf(),
                 detail: msg.clone().unwrap_or_else(|| e.to_string()),
@@ -368,7 +369,9 @@ impl Store {
     pub fn get_pinned(&self, id: i64) -> rusqlite::Result<bool> {
         let v: Option<i64> = self
             .conn
-            .query_row("SELECT pinned FROM items WHERE id=?1", params![id], |r| r.get(0))
+            .query_row("SELECT pinned FROM items WHERE id=?1", params![id], |r| {
+                r.get(0)
+            })
             .optional()?;
         Ok(v.unwrap_or(0) != 0)
     }
@@ -473,21 +476,27 @@ impl Store {
     /// 取正文（只在真正要粘贴/展示时才读，读完即释放）。
     pub fn get_text(&self, id: i64) -> rusqlite::Result<Option<String>> {
         self.conn
-            .query_row("SELECT text FROM items WHERE id=?1", params![id], |r| r.get(0))
+            .query_row("SELECT text FROM items WHERE id=?1", params![id], |r| {
+                r.get(0)
+            })
             .optional()
             .map(|v| v.flatten())
     }
 
     pub fn get_blob(&self, id: i64) -> rusqlite::Result<Option<Vec<u8>>> {
         self.conn
-            .query_row("SELECT blob FROM items WHERE id=?1", params![id], |r| r.get(0))
+            .query_row("SELECT blob FROM items WHERE id=?1", params![id], |r| {
+                r.get(0)
+            })
             .optional()
             .map(|v| v.flatten())
     }
 
     pub fn get_thumb(&self, id: i64) -> rusqlite::Result<Option<Vec<u8>>> {
         self.conn
-            .query_row("SELECT thumb FROM items WHERE id=?1", params![id], |r| r.get(0))
+            .query_row("SELECT thumb FROM items WHERE id=?1", params![id], |r| {
+                r.get(0)
+            })
             .optional()
             .map(|v| v.flatten())
     }
@@ -508,7 +517,9 @@ impl Store {
     pub fn get_kind(&self, id: i64) -> rusqlite::Result<Option<Kind>> {
         let v: Option<i64> = self
             .conn
-            .query_row("SELECT kind FROM items WHERE id=?1", params![id], |r| r.get(0))
+            .query_row("SELECT kind FROM items WHERE id=?1", params![id], |r| {
+                r.get(0)
+            })
             .optional()?;
         Ok(v.and_then(Kind::from_i64))
     }
@@ -518,7 +529,9 @@ impl Store {
         let count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?;
-        let bytes = std::fs::metadata(&self.path).map(|m| m.len() as i64).unwrap_or(0);
+        let bytes = std::fs::metadata(&self.path)
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
         Ok((count, bytes))
     }
 
@@ -590,7 +603,9 @@ const SELECT_ROWS: &str = "SELECT id, kind, preview, created_at, last_used_at, u
                            LIMIT ?1";
 
 fn unpinned_count(conn: &Connection) -> rusqlite::Result<i64> {
-    conn.query_row("SELECT COUNT(*) FROM items WHERE pinned=0", [], |r| r.get(0))
+    conn.query_row("SELECT COUNT(*) FROM items WHERE pinned=0", [], |r| {
+        r.get(0)
+    })
 }
 
 /// 在**同一个事务内**查找重复内容。
@@ -598,7 +613,10 @@ fn unpinned_count(conn: &Connection) -> rusqlite::Result<i64> {
 /// 哈希只当索引：命中候选后按类型逐项比对内容，因此 FNV64 碰撞不会造成误去重。
 /// 图片比对 `byte_len + 尺寸`（逐字节比对一个可能几十 MB 的 BLOB 不值得，
 /// 而 64 位哈希 + 长度 + 宽高三者同时相撞的概率可以忽略）。
-fn find_duplicate(tx: &rusqlite::Transaction<'_>, item: &CapturedItem) -> rusqlite::Result<Option<i64>> {
+fn find_duplicate(
+    tx: &rusqlite::Transaction<'_>,
+    item: &CapturedItem,
+) -> rusqlite::Result<Option<i64>> {
     let mut stmt = tx.prepare_cached(
         "SELECT id, byte_len, img_w, img_h, text FROM items
          WHERE kind=?1 AND hash=?2
@@ -695,7 +713,10 @@ mod tests {
     #[test]
     fn schema_and_pragmas_are_applied() {
         let (s, p) = open("schema");
-        let jm: String = s.conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        let jm: String = s
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(jm.to_lowercase(), "delete");
         assert_eq!(s.get_meta("schema.version").unwrap().as_deref(), Some("1"));
         assert_eq!(s.stats().unwrap().0, 0);
@@ -803,7 +824,8 @@ mod tests {
     fn list_orders_pinned_first_then_recent() {
         let (mut s, p) = open("order");
         for (i, body) in ["a", "b", "c"].iter().enumerate() {
-            s.upsert(&text_item(body, body), None, 100 + i as i64).unwrap();
+            s.upsert(&text_item(body, body), None, 100 + i as i64)
+                .unwrap();
         }
         s.set_pinned(1, true).unwrap();
         let rows = s.list_page("", 10).unwrap();
@@ -842,10 +864,12 @@ mod tests {
             s.upsert(&text_item(&body, &body), None, 1000 + i).unwrap();
         }
         s.set_pinned(1, true).unwrap();
-        let mut set = Settings::default();
-        set.max_items = 3;
-        set.keep_days = 0;
-        set.max_image_bytes = 0;
+        let set = Settings {
+            max_items: 3,
+            keep_days: 0,
+            max_image_bytes: 0,
+            ..Settings::default()
+        };
         let report = s.prune(&set, 10_000).unwrap();
         assert_eq!(report.by_count, 6); // 10 条里 1 条置顶 + 保留 3 条 → 删 6
         let rows = s.list_page("", 100).unwrap();
@@ -863,11 +887,17 @@ mod tests {
             let body = format!("old-{i}");
             s.upsert(&text_item(&body, &body), None, i).unwrap();
         }
-        let mut set = Settings::default();
-        set.max_items = 0;
-        set.keep_days = 0;
-        set.max_image_bytes = 0;
-        assert_eq!(s.prune(&set, 100 * day).unwrap().by_age, 0, "0 天 = 不按时间清理");
+        let mut set = Settings {
+            max_items: 0,
+            keep_days: 0,
+            max_image_bytes: 0,
+            ..Settings::default()
+        };
+        assert_eq!(
+            s.prune(&set, 100 * day).unwrap().by_age,
+            0,
+            "0 天 = 不按时间清理"
+        );
 
         set.keep_days = 1;
         let report = s.prune(&set, 10 * day).unwrap();
@@ -890,10 +920,13 @@ mod tests {
             item.img_h = 2;
             s.upsert(&item, Some(vec![0u8; 100]), 100 + i).unwrap();
         }
-        let mut set = Settings::default();
-        set.max_items = 0;
-        set.keep_days = 0;
-        set.max_image_bytes = 250; // 只放得下 2 张（每张 100 字节）
+        let set = Settings {
+            max_items: 0,
+            keep_days: 0,
+            // 只放得下 2 张（每张 100 字节）
+            max_image_bytes: 250,
+            ..Settings::default()
+        };
         let report = s.prune(&set, 10_000).unwrap();
         assert_eq!(report.by_image_bytes, 2);
         assert_eq!(s.stats().unwrap().0, 2);
@@ -922,9 +955,11 @@ mod tests {
     #[test]
     fn settings_roundtrip_through_db() {
         let (s, p) = open("settings");
-        let mut set = Settings::default();
-        set.max_items = 77;
-        set.pause_capture = true;
+        let set = Settings {
+            max_items: 77,
+            pause_capture: true,
+            ..Settings::default()
+        };
         set.save(&s).unwrap();
         let back = Settings::load(&s).unwrap();
         assert_eq!(back.max_items, 77);
@@ -941,11 +976,18 @@ mod tests {
         let (s, recovered) = Store::open_or_recover(&p).unwrap();
         let quarantined = recovered.expect("损坏文件必须被隔离，而不是静默删除");
         assert!(
-            quarantined.file_name().unwrap().to_string_lossy().contains("corrupt"),
+            quarantined
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("corrupt"),
             "隔离文件名要能一眼看出是损坏文件：{}",
             quarantined.display()
         );
-        assert!(quarantined.exists(), "隔离文件必须留在磁盘上，用户还有机会自救");
+        assert!(
+            quarantined.exists(),
+            "隔离文件必须留在磁盘上，用户还有机会自救"
+        );
         assert_eq!(s.stats().unwrap().0, 0, "重建后应是空库");
         drop(s);
         let _ = std::fs::remove_file(&quarantined);
@@ -965,7 +1007,9 @@ mod tests {
 
         // 另开一个连接并长期持有排它锁，模拟"另一个实例正在写"
         let blocker = Connection::open(&p).unwrap();
-        blocker.execute_batch("PRAGMA busy_timeout=0; BEGIN EXCLUSIVE;").unwrap();
+        blocker
+            .execute_batch("PRAGMA busy_timeout=0; BEGIN EXCLUSIVE;")
+            .unwrap();
 
         let result = Store::open_or_recover(&p);
         blocker.execute_batch("ROLLBACK;").unwrap();

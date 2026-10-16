@@ -6,7 +6,7 @@
 
 use windows_sys::Win32::Foundation::{CloseHandle, HWND};
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
@@ -43,7 +43,11 @@ pub fn process_name(pid: u32) -> Option<String> {
     }
     let path = String::from_utf16_lossy(&buf[..len as usize]);
     let name = file_name_of(&path);
-    if name.is_empty() { None } else { Some(name) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 #[cfg(test)]

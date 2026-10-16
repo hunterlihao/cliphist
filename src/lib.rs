@@ -6,6 +6,11 @@
 //! - [`ui`]：自绘弹窗与设置窗口（仅依赖 gdi32/user32）。
 //! - [`app`]：把上面三者接起来的状态机（控制器窗口过程）。
 
+// windows-sys 用裸指针类型表示 HWND / HANDLE / HDC 等**句柄**，它们不是指向内存的指针。
+// clippy 的 not_unsafe_ptr_arg_deref 会把"公开函数接收 HWND 并转交给 Win32"误判成
+// 解引用裸指针；本 crate 从不真正解引用这些句柄，因此关闭该 lint（而不是到处标 unsafe）。
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 pub mod app;
 pub mod core;
 pub mod image;

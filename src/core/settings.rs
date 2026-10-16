@@ -101,7 +101,10 @@ impl Settings {
             ("retention.max_items", self.max_items.to_string()),
             ("retention.keep_days", self.keep_days.to_string()),
             ("retention.max_item_bytes", self.max_item_bytes.to_string()),
-            ("retention.max_image_bytes", self.max_image_bytes.to_string()),
+            (
+                "retention.max_image_bytes",
+                self.max_image_bytes.to_string(),
+            ),
             ("image.max_edge", self.max_image_edge.to_string()),
             ("image.max_pixels", self.max_image_pixels.to_string()),
             ("capture.paused", bool_str(self.pause_capture)),
@@ -255,14 +258,16 @@ mod tests {
 
     #[test]
     fn roundtrip_through_pairs() {
-        let mut s = Settings::default();
-        s.max_items = 42;
-        s.keep_days = 0;
-        s.paste_mode = PasteMode::ClipboardOnly;
-        s.autostart = true;
-        s.capture_images = false;
-        s.hotkey_mods = MOD_CONTROL | MOD_SHIFT;
-        s.hotkey_vk = 0x70;
+        let s = Settings {
+            max_items: 42,
+            keep_days: 0,
+            paste_mode: PasteMode::ClipboardOnly,
+            autostart: true,
+            capture_images: false,
+            hotkey_mods: MOD_CONTROL | MOD_SHIFT,
+            hotkey_vk: 0x70,
+            ..Settings::default()
+        };
         let pairs: Vec<(String, String)> = s
             .to_pairs()
             .into_iter()
@@ -274,7 +279,10 @@ mod tests {
     #[test]
     fn garbage_values_fall_back_to_default() {
         let pairs = vec![
-            ("retention.max_items".to_string(), "not-a-number".to_string()),
+            (
+                "retention.max_items".to_string(),
+                "not-a-number".to_string(),
+            ),
             ("hotkey.vk".to_string(), "".to_string()),
             ("capture.paused".to_string(), "maybe".to_string()),
         ];

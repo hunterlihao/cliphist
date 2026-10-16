@@ -5,8 +5,8 @@
 
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
-    SetProcessDpiAwarenessContext,
+    GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 
 pub const BASE_DPI: u32 = 96;
@@ -21,12 +21,20 @@ pub fn set_process_dpi_awareness() -> bool {
 /// 窗口所在显示器的 DPI；拿不到时回落到 96。
 pub fn dpi_of_window(hwnd: HWND) -> u32 {
     let d = unsafe { GetDpiForWindow(hwnd) };
-    if d == 0 { BASE_DPI } else { d }
+    if d == 0 {
+        BASE_DPI
+    } else {
+        d
+    }
 }
 
 pub fn system_dpi() -> u32 {
     let d = unsafe { GetDpiForSystem() };
-    if d == 0 { BASE_DPI } else { d }
+    if d == 0 {
+        BASE_DPI
+    } else {
+        d
+    }
 }
 
 /// 逻辑像素 → 物理像素（四舍五入）。

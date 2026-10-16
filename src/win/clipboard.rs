@@ -16,12 +16,12 @@ use windows_sys::Win32::System::DataExchange::{
     RegisterClipboardFormatW, RemoveClipboardFormatListener, SetClipboardData,
 };
 use windows_sys::Win32::System::Memory::{
-    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
 };
 use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
-    SendInput, VK_CONTROL, VK_V,
+    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL, MOD_SHIFT,
+    MOD_WIN, VK_CONTROL, VK_V,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
@@ -29,8 +29,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::core::model::ImageData;
 use crate::core::payload::{
-    DROPEFFECT_COPY, DROPEFFECT_MOVE, build_drop_effect, build_hdrop, join_paths_text,
-    parse_drop_effect, parse_hdrop,
+    build_drop_effect, build_hdrop, join_paths_text, parse_drop_effect, parse_hdrop,
+    DROPEFFECT_COPY, DROPEFFECT_MOVE,
 };
 use crate::image::dib::{dib_to_rgba, parse_dib};
 use crate::image::thumb::decode_png_rgba;
@@ -80,7 +80,10 @@ pub enum Content {
     /// 对方明确要求不要记录。
     Ignored,
     Text(String),
-    Files { paths: Vec<String>, is_cut: bool },
+    Files {
+        paths: Vec<String>,
+        is_cut: bool,
+    },
     Image(ImageData),
     /// 认识格式但按策略跳过，附人类可读原因（用于气泡提示）。
     Skipped(&'static str),
@@ -281,9 +284,15 @@ fn read_format(fmt: u32, cap: usize) -> Option<Vec<u8>> {
 /// 写回剪贴板的负载。
 pub enum Payload<'a> {
     Text(&'a str),
-    Files { paths: &'a [String], is_cut: bool },
+    Files {
+        paths: &'a [String],
+        is_cut: bool,
+    },
     /// `dibv5` 保证兼容性（画图/Word/PS），`png` 保证现代应用拿到无损原图。
-    Image { dibv5: &'a [u8], png: &'a [u8] },
+    Image {
+        dibv5: &'a [u8],
+        png: &'a [u8],
+    },
 }
 
 /// 一次打开会话写完所有格式。
@@ -310,7 +319,11 @@ fn write_locked(payload: &Payload<'_>) -> Result<(), String> {
         Payload::Files { paths, is_cut } => {
             set_bytes(CF_HDROP, &build_hdrop(paths))?;
             // 明确告诉目标"这是复制"，否则粘到文件夹里会变成移动（原文件消失）。
-            let effect = if *is_cut { DROPEFFECT_MOVE } else { DROPEFFECT_COPY };
+            let effect = if *is_cut {
+                DROPEFFECT_MOVE
+            } else {
+                DROPEFFECT_COPY
+            };
             let eff_id = format_id(PREFERRED_DROP_EFFECT);
             if eff_id != 0 {
                 // 这个格式失败不影响文件粘贴，忽略错误。
@@ -488,8 +501,12 @@ mod tests {
 
     #[test]
     fn modifier_mapping_matches_settings_constants() {
-        let all = settings::MOD_CONTROL | settings::MOD_ALT | settings::MOD_SHIFT | settings::MOD_WIN;
-        assert_eq!(mods_to_win32(all), MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN);
+        let all =
+            settings::MOD_CONTROL | settings::MOD_ALT | settings::MOD_SHIFT | settings::MOD_WIN;
+        assert_eq!(
+            mods_to_win32(all),
+            MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN
+        );
         assert_eq!(mods_to_win32(0), 0);
         assert_eq!(mods_to_win32(settings::MOD_CONTROL), MOD_CONTROL);
         // 设置层与 Win32 层的数值必须完全一致，否则热键会注册成别的组合。

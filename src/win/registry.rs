@@ -4,8 +4,8 @@
 
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ, RegCloseKey,
-    RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ,
 };
 
 use crate::win::strings::{from_wide_until_nul, to_wide, wide_as_bytes};
@@ -62,15 +62,7 @@ pub fn set_autostart(enabled: bool, command: &str) -> Result<(), String> {
 fn disable_autostart() -> Result<(), String> {
     let mut hkey: HKEY = std::ptr::null_mut();
     let sub = to_wide(RUN_KEY);
-    let rc = unsafe {
-        RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            sub.as_ptr(),
-            0,
-            KEY_SET_VALUE,
-            &mut hkey,
-        )
-    };
+    let rc = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) };
     if rc != ERROR_SUCCESS {
         // 键不存在 = 本来就没开自启，不算错误。
         return Ok(());

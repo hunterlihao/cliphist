@@ -8,7 +8,7 @@
 use std::process::ExitCode;
 
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MSG, TranslateMessage,
+    DispatchMessageW, GetMessageW, TranslateMessage, MSG,
 };
 
 fn main() -> ExitCode {
@@ -90,7 +90,11 @@ fn main() -> ExitCode {
 }
 
 fn print_help() {
-    println!("{} {} —— 便携版剪贴板历史", cliphist::APP_TITLE, cliphist::VERSION);
+    println!(
+        "{} {} —— 便携版剪贴板历史",
+        cliphist::APP_TITLE,
+        cliphist::VERSION
+    );
     println!();
     println!("用法：ClipHist.exe [选项]");
     println!("  --autostart   开机自启模式（安静启动，不弹提示）");
@@ -119,7 +123,7 @@ fn bench_fill(count: usize, log_path: Option<String>) -> ExitCode {
     use cliphist::core::hash::hash_str;
     use cliphist::core::model::{CapturedItem, PathEntry};
     use cliphist::core::payload::hash_paths;
-    use cliphist::core::store::{Store, now_ms};
+    use cliphist::core::store::{now_ms, Store};
 
     let mut report: Vec<String> = Vec::new();
     let data = cliphist::win::paths::resolve_data_location();
@@ -151,7 +155,14 @@ fn bench_fill(count: usize, log_path: Option<String>) -> ExitCode {
                     make_text_preview(&text, 200),
                     text.clone(),
                     hash_str(&text),
-                    Some(if i % 2 == 0 { "chrome.exe" } else { "notepad.exe" }.into()),
+                    Some(
+                        if i % 2 == 0 {
+                            "chrome.exe"
+                        } else {
+                            "notepad.exe"
+                        }
+                        .into(),
+                    ),
                 )
             }
             1 => {
@@ -165,7 +176,12 @@ fn bench_fill(count: usize, log_path: Option<String>) -> ExitCode {
             }
             2 => {
                 let text = format!("SELECT id, preview FROM items WHERE id = {i};");
-                CapturedItem::text(text.clone(), text.clone(), hash_str(&text), Some("ssms.exe".into()))
+                CapturedItem::text(
+                    text.clone(),
+                    text.clone(),
+                    hash_str(&text),
+                    Some("ssms.exe".into()),
+                )
             }
             3 => {
                 let n = (i % 4) + 1;
@@ -196,7 +212,10 @@ fn bench_fill(count: usize, log_path: Option<String>) -> ExitCode {
                 )
             }
         };
-        if store.upsert(&item, None, base + (i as i64) * 60_000).is_ok() {
+        if store
+            .upsert(&item, None, base + (i as i64) * 60_000)
+            .is_ok()
+        {
             inserted += 1;
         }
     }
@@ -304,7 +323,10 @@ fn selftest_clipboard() -> ExitCode {
         .is_ok()
     );
     match clipboard::read(hwnd, &limits) {
-        Content::Files { paths: back, is_cut } => {
+        Content::Files {
+            paths: back,
+            is_cut,
+        } => {
             check!("文件路径往返一致", back == paths);
             check!("复制（非剪切）语义正确", !is_cut);
         }
@@ -459,9 +481,15 @@ fn selftest() -> ExitCode {
         Some("selftest.exe".into()),
     );
     let first = store.upsert(&item, None, 1_000);
-    check!("插入文本条目", matches!(first, Ok(WriteOutcome::Inserted(_))));
+    check!(
+        "插入文本条目",
+        matches!(first, Ok(WriteOutcome::Inserted(_)))
+    );
     let again = store.upsert(&item, None, 2_000);
-    check!("重复内容被识别为同一条", matches!(again, Ok(WriteOutcome::Touched(_))));
+    check!(
+        "重复内容被识别为同一条",
+        matches!(again, Ok(WriteOutcome::Touched(_)))
+    );
     check!(
         "去重后只有一条记录",
         store.stats().map(|(n, _)| n == 1).unwrap_or(false)
@@ -554,21 +582,33 @@ fn selftest() -> ExitCode {
     );
     check!(
         "图片缩略图状态为待生成",
-        store.pending_thumbs(10).map(|p| p.len() == 1).unwrap_or(false)
+        store
+            .pending_thumbs(10)
+            .map(|p| p.len() == 1)
+            .unwrap_or(false)
     );
 
     // 列表与搜索
     check!(
         "列表返回 3 条",
-        store.list_page("", 10).map(|r| r.len() == 3).unwrap_or(false)
+        store
+            .list_page("", 10)
+            .map(|r| r.len() == 3)
+            .unwrap_or(false)
     );
     check!(
         "搜索命中文本",
-        store.list_page("hello", 10).map(|r| r.len() == 1).unwrap_or(false)
+        store
+            .list_page("hello", 10)
+            .map(|r| r.len() == 1)
+            .unwrap_or(false)
     );
     check!(
         "搜索命中文件名",
-        store.list_page("a.txt", 10).map(|r| r.len() == 1).unwrap_or(false)
+        store
+            .list_page("a.txt", 10)
+            .map(|r| r.len() == 1)
+            .unwrap_or(false)
     );
     check!(
         "搜索结果类型正确",
@@ -579,10 +619,12 @@ fn selftest() -> ExitCode {
     );
 
     // 保留策略
-    let mut settings = Settings::default();
-    settings.max_items = 2;
-    settings.keep_days = 0;
-    settings.max_image_bytes = 0;
+    let mut settings = Settings {
+        max_items: 2,
+        keep_days: 0,
+        max_image_bytes: 0,
+        ..Settings::default()
+    };
     check!(
         "按条数修剪生效",
         store
@@ -596,7 +638,9 @@ fn selftest() -> ExitCode {
     check!("设置写入", settings.save(&store).is_ok());
     check!(
         "设置读回",
-        Settings::load(&store).map(|s| s.max_items == 77).unwrap_or(false)
+        Settings::load(&store)
+            .map(|s| s.max_items == 77)
+            .unwrap_or(false)
     );
 
     drop(store);
