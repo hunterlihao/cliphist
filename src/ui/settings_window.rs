@@ -773,7 +773,13 @@ mod tests {
             assert!(st.values.max_items > 0);
 
             st.step(RowKind::KeepDays, Half::Decrease);
+            assert_eq!(st.values.keep_days, 29, "默认 30 天，减一次应当是 29");
+            for _ in 0..40 {
+                st.step(RowKind::KeepDays, Half::Decrease);
+            }
             assert_eq!(st.values.keep_days, 0, "天数下限是 0（= 不限）");
+            st.step(RowKind::KeepDays, Half::Decrease);
+            assert_eq!(st.values.keep_days, 0, "到 0 之后必须保持 0，不能变负");
 
             st.values.max_item_bytes = 1024 * 1024;
             st.step(RowKind::MaxItemMb, Half::Decrease);

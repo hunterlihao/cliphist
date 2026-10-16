@@ -105,8 +105,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn writable_probe_accepts_temp_dir() {
-        assert!(dir_is_writable(&std::env::temp_dir()));
+    fn writable_probe_works_on_a_known_writable_dir() {
+        // 刻意不用 %TEMP%：在受限沙箱/受管环境里，测试进程（更深一层的子进程）
+        // 可能拿不到 `%TEMP%` 的写权限 —— 那是环境属性，不是待测函数的语义。
+        // 这里用工作区目录验证语义本身：探测文件建得起来、删得掉、不留垃圾。
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        assert!(dir_is_writable(&dir), "工作区目录应当可写");
+        assert!(
+            !dir.join(".cliphist-write-probe").exists(),
+            "探测文件必须被清理，不能在用户目录里留垃圾"
+        );
     }
 
     #[test]
