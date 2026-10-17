@@ -22,6 +22,9 @@ fn main() {
     res.set("OriginalFilename", "ClipHist.exe");
     res.set("InternalName", "ClipHist");
 
+    // exe 图标：资源管理器 / 任务栏 / 属性页里都能看到，和托盘图标同一套视觉。
+    res.set_icon("res/cliphist.ico");
+
     // 版本号由 winresource 从 CARGO_PKG_VERSION 自动填入 FileVersion / ProductVersion。
     if let Err(e) = res.compile() {
         println!("cargo:warning=VERSIONINFO 未能嵌入（不影响功能）：{e}");

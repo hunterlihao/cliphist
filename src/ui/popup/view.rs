@@ -259,6 +259,27 @@ impl PopupState {
             let preview_right = (text_right - time_w - m.gap).max(text_left + m.gap);
             let preview_rc = rect(text_left, top, preview_right, top + line_h);
             gdi::text(dc, self.fonts.ui, fg, &preview_rc, &row.preview, false);
+            // 命中高亮：给匹配到的片段加一道墨线。不换色也不换字重 ——
+            // 换字重会让整行宽度跳动，长列表里看着发抖。
+            let tokens = crate::core::filter::tokenize(&self.query);
+            if !tokens.is_empty() {
+                for (s, e) in crate::core::filter::highlight_ranges(&row.preview, &tokens) {
+                    if s >= row.preview.len() {
+                        break;
+                    }
+                    let e = e.min(row.preview.len());
+                    let x0 =
+                        preview_rc.left + gdi::text_width(dc, self.fonts.ui, &row.preview[..s]);
+                    if x0 >= preview_rc.right {
+                        break;
+                    }
+                    let x1 = (x0 + gdi::text_width(dc, self.fonts.ui, &row.preview[s..e]))
+                        .min(preview_rc.right);
+                    if x1 > x0 {
+                        gdi::hline(dc, x0, x1, preview_rc.bottom - 2, color::INK);
+                    }
+                }
+            }
             gdi::text(dc, self.fonts.mono, fg3, &time_rc, &time, false);
 
             // 第二行：元信息

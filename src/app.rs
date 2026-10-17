@@ -583,6 +583,76 @@ impl App {
         }
     }
 
+    /// 用系统看图程序打开某条图片（Ctrl+Enter）。
+    ///
+    /// 自己写一个缩放看图窗口当然也行，但那意味着再维护一套图片缩放/滚轮/全屏逻辑；
+    /// 借系统的默认查看器更像"顺手"：能缩放、能另存、能设壁纸，而且零额外内存。
+    fn view_image(&mut self, id: i64) {
+        let Ok(Some(png)) = self.read.get_blob(id) else {
+            self.balloon("打不开这张图", "图片数据读取失败。", true);
+            return;
+        };
+        let path = std::env::temp_dir().join(format!("ClipHist-预览-{id}.png"));
+        if let Err(e) = std::fs::write(&path, &png) {
+            self.balloon("打不开这张图", &format!("写临时文件失败：{e}"), true);
+            return;
+        }
+        let wide = crate::win::strings::to_wide(&path.display().to_string());
+        let verb = crate::win::strings::to_wide("open");
+        unsafe {
+            windows_sys::Win32::UI::Shell::ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                wide.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            );
+        }
+    }
+
+    /// 把队列合并成一段多行文本放进剪贴板（Ctrl+Shift+Enter）。
+    ///
+    /// 只合并文本类条目；文件条目退化成"路径一行一个"，图片无法合并会被跳过。
+    fn merge_queue(&mut self, target: HWND) {
+        if self.queue.len() < 2 {
+            self.balloon("队列太短", "至少要有 2 条才能合并粘贴。", false);
+            return;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        for id in self.queue.clone() {
+            match self.read.get_kind(id).ok().flatten() {
+                Some(Kind::Text) => {
+                    if let Ok(Some(t)) = self.read.get_text(id) {
+                        parts.push(t);
+                    }
+                }
+                Some(Kind::Files) => {
+                    if let Ok(list) = self.read.get_files(id) {
+                        parts.extend(list.into_iter().map(|e| e.path));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if parts.is_empty() {
+            self.balloon("没有可合并的内容", "队列里只有图片时无法合并。", false);
+            return;
+        }
+        let joined = parts.join("\r\n");
+        let n = parts.len();
+        match clipboard::write(self.hwnd, &Payload::Text(&joined)) {
+            Ok(()) => {
+                self.suppress_seq = Some(clipboard::sequence_number());
+                if !target.is_null() {
+                    popup::hide(target);
+                }
+                self.balloon("已合并复制", &format!("{n} 段内容已合成一段文本。"), false);
+            }
+            Err(e) => self.balloon("合并失败", &e, true),
+        }
+    }
+
     /// 粘贴队列里的下一条（Ctrl+Alt+V）。
     fn paste_next(&mut self) {
         if self.queue.is_empty() {
@@ -1248,6 +1318,28 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 }),
                 _ => {}
             }
+            return 0;
+        }
+        popup::WM_POPUP_VIEW_IMAGE => {
+            let id = lp as i64;
+            APP.with(|c| {
+                if let Ok(mut g) = c.try_borrow_mut() {
+                    if let Some(app) = g.as_mut() {
+                        app.view_image(id);
+                    }
+                }
+            });
+            return 0;
+        }
+        popup::WM_POPUP_MERGE => {
+            let target = wp as HWND;
+            APP.with(|c| {
+                if let Ok(mut g) = c.try_borrow_mut() {
+                    if let Some(app) = g.as_mut() {
+                        app.merge_queue(target);
+                    }
+                }
+            });
             return 0;
         }
         popup::WM_POPUP_QUEUE => {

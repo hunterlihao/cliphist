@@ -124,6 +124,10 @@ pub enum KeyAction {
     Context,
     /// 加入/移出粘贴队列
     Queue,
+    /// 把队列合并成一段多行文本复制走
+    MergeQueue,
+    /// 用系统看图程序打开选中图片
+    ViewImage,
     Pin,
     Delete,
     Close,
@@ -141,6 +145,10 @@ pub fn handle_key(
     match vk {
         VK_SPACE => (KeyAction::Queue, false),
         VK_ESCAPE => (KeyAction::Close, false),
+        // Ctrl+Shift+Enter：把队列合并成多行文本一次复制（不自动粘贴）
+        VK_RETURN if ctrl && shift => (KeyAction::MergeQueue, false),
+        // Ctrl+Enter：图片条目用系统看图程序打开（默认查看器，支持缩放/另存）
+        VK_RETURN if ctrl => (KeyAction::ViewImage, false),
         VK_RETURN => (
             KeyAction::Choose {
                 clipboard_only: shift,

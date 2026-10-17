@@ -408,68 +408,94 @@ impl Store {
     // -------------------------------------------------------------- 读取
 
     /// 列表页。`query` 为空时返回最近的条目（置顶优先）。
+    /// 查一页列表。`query` 会先分词，然后要求**每个词都命中**（AND）。
+    ///
+    /// 排序不是单纯按时间：置顶优先 → 第一个词出现得越靠前越优先 → 最近使用。
+    /// 这样搜 `code` 时，预览以 code 开头的条目会排在"code 出现在句中"的前面。
     pub fn list_page(&self, query: &str, limit: i64) -> rusqlite::Result<Vec<ItemRow>> {
         let q = query.trim();
         if q.is_empty() {
-            self.query_rows(SELECT_ROWS, params![limit])
-        } else {
-            let pattern = format!("%{}%", escape_like(q));
-            let rows = self.query_rows(
-                "SELECT id, kind, preview, created_at, last_used_at, use_count, pinned,
-                        source_exe, file_count, img_w, img_h, thumb_state
-                 FROM items
-                 WHERE preview LIKE ?1 ESCAPE '\\'
-                 ORDER BY pinned DESC, last_used_at DESC
-                 LIMIT ?2",
-                params![pattern, limit],
-            )?;
-            if !rows.is_empty() {
-                return Ok(rows);
-            }
-            // 预览没命中才回退全文搜索，且只在最近的、体积可控的条目里找。
-            let plan = SearchPlan::default();
-            if !plan.fallback_to_text {
-                return Ok(rows);
-            }
-            let pattern = format!("%{}%", escape_like(q));
-            self.query_rows(
-                "SELECT id, kind, preview, created_at, last_used_at, use_count, pinned,
-                        source_exe, file_count, img_w, img_h, thumb_state
-                 FROM (SELECT * FROM items
-                       WHERE byte_len <= ?2
-                       ORDER BY last_used_at DESC
-                       LIMIT ?3)
-                 WHERE text LIKE ?1 ESCAPE '\\'
-                 ORDER BY pinned DESC, last_used_at DESC
-                 LIMIT ?4",
-                params![
-                    pattern,
-                    plan.fallback_max_text_len,
-                    plan.fallback_scan_limit,
-                    limit
-                ],
-            )
+            return self.query_rows(SELECT_ROWS, params![limit]);
         }
+
+        let mut tokens = crate::core::filter::tokenize(q);
+        if tokens.is_empty() {
+            tokens.push(q.to_lowercase());
+        }
+        let patterns: Vec<String> = tokens
+            .iter()
+            .map(|t| format!("%{}%", escape_like(t)))
+            .collect();
+        let n = tokens.len();
+
+        // ① 先只搜预览：列表本来就只加载预览，这一步最快。
+        let preview_where = (1..=n)
+            .map(|i| format!("preview LIKE ?{i} ESCAPE '\\'"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let sql = format!(
+            "SELECT {COLS}
+             FROM items
+             WHERE {preview_where}
+             ORDER BY pinned DESC, last_used_at DESC
+             LIMIT ?{lim}",
+            lim = n + 1
+        );
+        let mut binds: Vec<&dyn rusqlite::ToSql> =
+            patterns.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        binds.push(&limit);
+        let mut rows = self.query_rows_dyn(&sql, &binds)?;
+        if !rows.is_empty() {
+            rank_rows(&mut rows, &tokens);
+            return Ok(rows);
+        }
+
+        // ② 预览没命中才回退全文（只在最近的、体积可控的条目里找）。
+        let plan = SearchPlan::default();
+        if !plan.fallback_to_text {
+            return Ok(rows);
+        }
+        let text_where = (1..=n)
+            .map(|i| format!("(preview LIKE ?{i} ESCAPE '\\' OR text LIKE ?{i} ESCAPE '\\')"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let sql = format!(
+            "SELECT {COLS}
+             FROM (SELECT * FROM items
+                   WHERE byte_len <= ?{len_idx}
+                   ORDER BY last_used_at DESC
+                   LIMIT ?{scan_idx})
+             WHERE {text_where}
+             ORDER BY pinned DESC, last_used_at DESC
+             LIMIT ?{lim}",
+            len_idx = n + 1,
+            scan_idx = n + 2,
+            lim = n + 3
+        );
+        let mut binds: Vec<&dyn rusqlite::ToSql> =
+            patterns.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        binds.push(&plan.fallback_max_text_len);
+        binds.push(&plan.fallback_scan_limit);
+        binds.push(&limit);
+        let mut rows = self.query_rows_dyn(&sql, &binds)?;
+        rank_rows(&mut rows, &tokens);
+        Ok(rows)
+    }
+
+    /// 用动态参数执行查询（词数不定，无法用 `params!` 宏）。
+    fn query_rows_dyn(
+        &self,
+        sql: &str,
+        binds: &[&dyn rusqlite::ToSql],
+    ) -> rusqlite::Result<Vec<ItemRow>> {
+        let mut stmt = self.conn.prepare_cached(sql)?;
+        let rows = stmt.query_map(binds, map_row)?;
+        rows.collect()
     }
 
     fn query_rows<P: rusqlite::Params>(&self, sql: &str, p: P) -> rusqlite::Result<Vec<ItemRow>> {
         let mut stmt = self.conn.prepare_cached(sql)?;
-        let rows = stmt.query_map(p, |r| {
-            Ok(ItemRow {
-                id: r.get(0)?,
-                kind: Kind::from_i64(r.get(1)?).unwrap_or(Kind::Text),
-                preview: r.get(2)?,
-                created_at: r.get(3)?,
-                last_used_at: r.get(4)?,
-                use_count: r.get(5)?,
-                pinned: r.get::<_, i64>(6)? != 0,
-                source_exe: r.get(7)?,
-                file_count: r.get(8)?,
-                img_w: r.get(9)?,
-                img_h: r.get(10)?,
-                thumb_state: r.get(11)?,
-            })
-        })?;
+        let rows = stmt.query_map(p, map_row)?;
         rows.collect()
     }
 
@@ -1052,4 +1078,52 @@ mod tests {
         };
         assert!(corrupt.to_string().contains("已损坏"));
     }
+}
+
+/// 列清单（多处以同一顺序读取，集中一处免得漂移）。
+const COLS: &str = "id, kind, preview, created_at, last_used_at, use_count, pinned,
+                    source_exe, file_count, img_w, img_h, thumb_state";
+
+fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
+    Ok(ItemRow {
+        id: r.get(0)?,
+        kind: Kind::from_i64(r.get(1)?).unwrap_or(Kind::Text),
+        preview: r.get(2)?,
+        created_at: r.get(3)?,
+        last_used_at: r.get(4)?,
+        use_count: r.get(5)?,
+        pinned: r.get::<_, i64>(6)? != 0,
+        source_exe: r.get(7)?,
+        file_count: r.get(8)?,
+        img_w: r.get(9)?,
+        img_h: r.get(10)?,
+        thumb_state: r.get(11)?,
+    })
+}
+
+/// 相关度排序：置顶 → 首词出现位置 → 最近使用。
+///
+/// 只按时间排会出现"明明以关键字开头的那条排在后面"，搜索体验会很怪。
+fn rank_rows(rows: &mut [ItemRow], tokens: &[String]) {
+    let first = tokens.first().cloned().unwrap_or_default();
+    rows.sort_by(|a, b| {
+        use std::cmp::Ordering;
+        let ka = (
+            a.pinned,
+            a.preview.to_lowercase().find(&first).unwrap_or(usize::MAX),
+            a.last_used_at,
+        );
+        let kb = (
+            b.pinned,
+            b.preview.to_lowercase().find(&first).unwrap_or(usize::MAX),
+            b.last_used_at,
+        );
+        match kb.0.cmp(&ka.0) {
+            Ordering::Equal => match ka.1.cmp(&kb.1) {
+                Ordering::Equal => kb.2.cmp(&ka.2),
+                other => other,
+            },
+            other => other,
+        }
+    });
 }

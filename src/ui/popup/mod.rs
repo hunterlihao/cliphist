@@ -56,6 +56,12 @@ mod view;
 pub use chrome::{title_hit, TitleHit};
 pub use nav::{handle_key, row_at, row_rect, KeyAction, ListNav};
 
+// 主窗口手动缩放用到的几个 Win32 符号（单独列出，免得和上面那串长导入互相干扰）
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetWindowRect, SWP_NOZORDER, WM_LBUTTONUP, WM_SIZE,
+};
+
 pub const CLASS_NAME: &str = "ClipHist.Popup";
 
 /// 主窗口 → 控制器：请打开设置（标题栏上的"设置"按钮）。
@@ -97,12 +103,19 @@ pub const WM_POPUP_PIN: u32 = WM_APP + 15;
 /// 弹窗 → 控制器：删除某条。
 pub const WM_POPUP_DELETE: u32 = WM_APP + 16;
 /// 列表 → 控制器：把这条加入/移出粘贴队列（wParam = 发送者）。
-pub const WM_POPUP_QUEUE: u32 = WM_APP + 21;
+pub const WM_POPUP_QUEUE: u32 = WM_APP + 22;
+/// 列表 → 控制器：把队列合并成一段多行文本复制走（wParam = 发送者）。
+pub const WM_POPUP_MERGE: u32 = WM_APP + 23;
+/// 列表 → 控制器：用系统看图程序打开这条图片。
+pub const WM_POPUP_VIEW_IMAGE: u32 = WM_APP + 24;
 
 const EN_CHANGE: usize = 0x0300;
 const VK_RETURN: usize = 0x0D;
 const VK_ESCAPE: usize = 0x1B;
 const VK_SPACE: usize = 0x20;
+/// 主窗口拖拽缩放的最小尺寸
+const MIN_W: i32 = 520;
+const MIN_H: i32 = 380;
 const VK_UP: usize = 0x26;
 const VK_DOWN: usize = 0x28;
 const VK_PRIOR: usize = 0x21;
@@ -141,6 +154,8 @@ struct PopupState {
     menu_open: bool,
     /// 粘贴队列（有序的条目 id），只存在内存里 —— 它是一次性动作，不该进库。
     queue: Vec<i64>,
+    /// 正在拖拽缩放：边标志(1左 2右 4上 8下)、按下时的屏幕坐标与窗口尺寸。
+    resizing: Option<(u32, i32, i32, i32, i32)>,
     /// 仅预览模式用：离屏渲染不包含子窗口（EDIT），所以由父窗口代画输入框内容
     /// （空字符串表示"空输入框"，会画一根光标），这样预览图才跟用户看到的一致。
     preview_text: Option<String>,
@@ -176,6 +191,7 @@ impl PopupState {
             rounded: false,
             menu_open: false,
             queue: Vec::new(),
+            resizing: None,
             anchor: None,
             preview_text: None,
         }
@@ -451,6 +467,8 @@ enum Outcome {
     Choose { id: i64, clipboard_only: bool },
     Context { id: i64 },
     Queue { id: i64 },
+    MergeQueue,
+    ViewImage,
     Pin { id: i64 },
     Delete { id: i64 },
 }
@@ -471,6 +489,18 @@ unsafe fn dispatch(hwnd: HWND, out: Outcome) {
             hide(hwnd);
             if !owner.is_null() {
                 PostMessageW(owner, WM_POPUP_CHOOSE, clipboard_only as usize, id as isize);
+            }
+        }
+        Outcome::ViewImage => {
+            if let Some(st) = state(hwnd) {
+                if let Some(id) = st.current_id() {
+                    PostMessageW(owner, WM_POPUP_VIEW_IMAGE, 0, id as isize);
+                }
+            }
+        }
+        Outcome::MergeQueue => {
+            if !owner.is_null() {
+                PostMessageW(owner, WM_POPUP_MERGE, hwnd as usize, 0);
             }
         }
         Outcome::Queue { id } => {
@@ -513,6 +543,8 @@ fn outcome_for(st: &PopupState, action: KeyAction, repaint: bool) -> Outcome {
             Some(id) => Outcome::Choose { id, clipboard_only },
             None => Outcome::None,
         },
+        KeyAction::MergeQueue => Outcome::MergeQueue,
+        KeyAction::ViewImage => Outcome::ViewImage,
         KeyAction::Queue => match id {
             Some(id) => Outcome::Queue { id },
             None => Outcome::None,
@@ -624,6 +656,21 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             }
             return 0;
         }
+        WM_SIZE => {
+            // 主窗口可缩放：把新的客户区尺寸写回度量，排版随之重算。
+            if let Some(st) = state(hwnd) {
+                if st.mode == Mode::Main {
+                    let (w, h) = (loword(lp) as i32, hiword(lp) as i32);
+                    if w > 0 && h > 0 {
+                        st.metrics.width = w;
+                        st.metrics.max_height = h;
+                        st.layout_edit();
+                        invalidate(hwnd);
+                    }
+                }
+            }
+            return 0;
+        }
         WM_PAINT => {
             if let Some(st) = state(hwnd) {
                 let mut ps: PAINTSTRUCT = zeroed();
@@ -680,6 +727,55 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             return 0;
         }
         WM_MOUSEMOVE => {
+            // 缩放中：按屏幕光标位移算新尺寸（左/上边拖动时原点也要动）。
+            let scaling = state(hwnd).and_then(|st| st.resizing);
+            if let Some((bits, _, _, w0, h0)) = scaling {
+                let mut pt = POINT { x: 0, y: 0 };
+                unsafe { GetCursorPos(&mut pt) };
+                let anchor = state(hwnd).and_then(|_st| {
+                    let mut rc = rect(0, 0, 0, 0);
+                    unsafe { GetWindowRect(hwnd, &mut rc) };
+                    Some((rc.left, rc.top))
+                });
+                if let Some((left0, top0)) = anchor {
+                    let mut x = left0;
+                    let mut y = top0;
+                    let mut w = w0;
+                    let mut h = h0;
+                    if bits & 1 != 0 {
+                        let dx = left0 - pt.x;
+                        w += dx;
+                        x = pt.x;
+                    }
+                    if bits & 2 != 0 {
+                        w += pt.x - (left0 + w0);
+                    }
+                    if bits & 4 != 0 {
+                        let dy = top0 - pt.y;
+                        h += dy;
+                        y = pt.y;
+                    }
+                    if bits & 8 != 0 {
+                        h += pt.y - (top0 + h0);
+                    }
+                    let (w, h) = (w.max(MIN_W), h.max(MIN_H));
+                    unsafe {
+                        SetWindowPos(
+                            hwnd,
+                            std::ptr::null_mut(),
+                            x,
+                            y,
+                            w,
+                            h,
+                            SWP_NOZORDER | 0x0010,
+                        )
+                    };
+                    if let Some(st) = state(hwnd) {
+                        st.resizing = Some((bits, 0, 0, w, h));
+                    }
+                }
+                return 0;
+            }
             if let Some(st) = state(hwnd) {
                 let y = hiword(lp);
                 let idx = row_at(&st.metrics, st.nav.top, y).filter(|i| *i < st.rows.len());
@@ -709,6 +805,37 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             return HTCLIENT as isize;
         }
         WM_LBUTTONDOWN => {
+            // 主窗口边缘 8px 内按下 → 进入手动缩放。
+            // 不挂 WS_THICKFRAME：那会让系统额外画一圈边框，破坏自绘外观。
+            if let Some((cx, cy, w, h)) = state(hwnd).map(|_st| {
+                let mut rc = rect(0, 0, 0, 0);
+                unsafe { GetClientRect(hwnd, &mut rc) };
+                (loword(lp), hiword(lp), rc.right, rc.bottom)
+            }) {
+                const EDGE: i32 = 8;
+                let mut bits = 0u32;
+                if cx <= EDGE {
+                    bits |= 1
+                }
+                if cx >= w - EDGE {
+                    bits |= 2
+                }
+                if cy <= EDGE {
+                    bits |= 4
+                }
+                if cy >= h - EDGE {
+                    bits |= 8
+                }
+                let is_main = state(hwnd).map(|st| st.mode == Mode::Main).unwrap_or(false);
+                if is_main && bits != 0 {
+                    if let Some(st) = state(hwnd) {
+                        st.resizing = Some((bits, 0, 0, w, h));
+                        unsafe { SetCapture(hwnd) };
+                    }
+                    return 0;
+                }
+            }
+
             // 主窗口的标题栏按钮：先算命中（拿到纯值），再动作 —— 因为
             // hide() 会同步派发消息，动作期间不能还握着 &mut PopupState。
             let title_click =
@@ -739,6 +866,17 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let out = activate_row(hwnd, hiword(lp), activate);
             dispatch(hwnd, out);
             return 0;
+        }
+        WM_LBUTTONUP => {
+            let scaling = state(hwnd).and_then(|st| st.resizing);
+            if scaling.is_some() {
+                if let Some(st) = state(hwnd) {
+                    st.resizing = None;
+                }
+                unsafe { ReleaseCapture() };
+                return 0;
+            }
+            return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
         }
         WM_LBUTTONDBLCLK => {
             // 只有主窗口会走到这里（浮动列表单击就已经粘贴并关窗了）。
