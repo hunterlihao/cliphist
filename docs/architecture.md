@@ -122,7 +122,6 @@ item_files(item_id, ordinal, path, is_dir)   -- 文件条目，外键 ON DELETE 
 `busy_timeout` 必须**最先**设置：否则紧接着的 `journal_mode` 在库被占用时会立刻返回 BUSY 而不是等待。
 
 ## 7. Win32 层的三个坑（都在代码里留了注释）
-
 1. **弹窗的窗口过程不能被重入**。所以弹窗自己不弹菜单、不弹模态框 ——
    右键菜单交给控制器窗口去弹（`TrackPopupMenu` 会泵消息）。
    凡是会同步派发消息的动作（只有 `ShowWindow(SW_HIDE)`）都推迟到
@@ -142,7 +141,54 @@ item_files(item_id, ordinal, path, is_dir)   -- 文件条目，外键 ON DELETE 
 - 前台进程名用 `PROCESS_QUERY_LIMITED_INFORMATION` 查询，对更高完整性级别的进程也能成功，
   拿不到就返回 `None`，绝不因此丢一条历史。
 
-## 8. 关键决策记录
+## 8. 启动流程与"绝不阻塞初始化"
+
+顺序是有讲究的：
+
+```
+main
+ ① CLI 模式先把 stdout 接回调用者终端（GUI 子系统进程默认没有 stdout）
+ ② 设置进程 DPI 感知                  ← 必须在任何窗口之前
+ ③ 单实例互斥体（已有实例就唤醒它并退出）
+ ④ 注册三个窗口类 → 创建控制器窗口（隐藏）
+      WM_CREATE：创建弹窗、设置窗口、App（开库、起写线程）
+ ⑤ init_runtime：托盘 → 剪贴板监听 → 全局热键 → 注册唤醒消息
+ ⑥ GetMessage 循环
+```
+
+一条硬规则：**第 ⑤ 步里任何一项失败都不许阻塞或退出**。
+
+这条规则是踩出来的：早期版本在托盘创建失败时弹模态错误框，结果初始化卡在消息框上，
+消息循环根本没开始跑，剪贴板通知一条也处理不了 —— 表现为"进程活着、内存正常、
+但就是什么都不记录"，而且没有任何报错可看。现在的处理：
+
+| 失败项 | 处理 |
+|---|---|
+| 托盘图标（受限令牌 / 外壳不可用时 `Shell_NotifyIcon` 会返回 `ERROR_ACCESS_DENIED`） | 记录 + 继续运行，列表页脚显示"托盘不可用"；热键弹窗照常可用 |
+| 剪贴板监听 | 致命（没有它就完全没有功能）：弹消息框后退出 |
+| 全局热键（组合键被占用） | 继续运行 + 托盘气泡提示，设置里可改键 |
+
+## 9. 诊断日志（`--log`）
+
+默认完全关闭（连文件都不打开，零开销）。加上 `--log clip.log` 后，采集链路的五段全部留痕：
+
+```
+tray: NIM_ADD = 0 (cbSize=976 lastError=5)
+init: tray = FAILED
+clipboard: WM_CLIPBOARDUPDATE seq=511 suppress=None
+ingest: content=Text("…") source=Some("chrome.exe")
+ingest: → store kind=Text preview="…"
+writer: upsert kind=Text → Inserted(1)
+```
+
+设计上的一个细节：这个开关用**静态变量**保存文件句柄，而不是 App 的字段 ——
+因为写日志会发生在 `&mut App` 被借用期间（例如 wndproc 内部），
+若日志也要借 App 就会重入冲突。
+
+它的价值在测试里已经兑现过一次：正是靠它才定位到"托盘失败 → 模态框 → 初始化卡死"
+这条链路，否则现场看到的只是"程序在跑但不记录"。
+
+## 10. 关键决策记录
 
 | 决策 | 取舍 |
 |---|---|

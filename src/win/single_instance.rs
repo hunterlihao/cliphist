@@ -31,10 +31,19 @@ impl Drop for InstanceGuard {
 ///
 /// - `Some(guard)`：当前进程是第一个实例。
 /// - `None`：已经有实例在跑（调用方应当 [`wake_existing`] 后立刻退出）。
+pub fn acquire() -> Option<InstanceGuard> {
+    acquire_named(MUTEX_NAME)
+}
+
+/// 用指定名字获取互斥体。
+///
+/// 单独暴露带名字的版本，是为了让测试用**自己的**名字：否则单测会去抢真实应用实例
+/// 正在持有的 `Local\ClipHist.SingleInstance`，变成"程序开着的时候 cargo test 就失败"
+/// 这种环境依赖 —— 测试不该因为用户正在用软件而变红。
 ///
 /// 互斥体创建本身失败时不阻止启动：宁可多开一个，也不要让用户完全用不了。
-pub fn acquire() -> Option<InstanceGuard> {
-    let name = to_wide(MUTEX_NAME);
+pub fn acquire_named(name: &str) -> Option<InstanceGuard> {
+    let name = to_wide(name);
     let handle = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
     if handle.is_null() {
         return Some(InstanceGuard {
@@ -68,15 +77,16 @@ mod tests {
 
     #[test]
     fn mutex_is_exclusive_within_process() {
-        // 同一个进程再取一次也必须拿到 ERROR_ALREADY_EXISTS。
-        // 注意：这条测试会让"当前进程"一直持有互斥体到测试结束（Drop 释放）。
-        let first = acquire();
+        // 用独立名字，避免与正在运行的真实实例抢同一个互斥体。
+        let name = format!("Local\\ClipHist.Test.{}", std::process::id());
+        let first = acquire_named(&name);
         assert!(first.is_some(), "第一次获取必须成功");
-        let second = acquire();
+        let second = acquire_named(&name);
         assert!(second.is_none(), "第二次获取必须被判定为重复实例");
+        drop(second);
         drop(first);
         // 释放后应可再次获取
-        let third = acquire();
+        let third = acquire_named(&name);
         assert!(third.is_some(), "释放后应能重新获取");
     }
 }

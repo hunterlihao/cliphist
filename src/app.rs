@@ -119,8 +119,10 @@ impl Writer {
 /// 写线程主循环。
 fn writer_loop(rx: Receiver<DbMsg>, db_path: PathBuf, mut settings: Settings, notify: HWND) {
     let Ok((mut store, _recovered)) = Store::open_or_recover(&db_path) else {
+        diag(format_args!("writer: 打开数据文件失败，写线程退出"));
         return;
     };
+    diag(format_args!("writer: 已就绪 db={}", db_path.display()));
 
     // 程序上次被杀掉时可能留下"待生成缩略图"的图片，先补做。
     backfill_thumbs(&mut store, notify);
@@ -195,6 +197,10 @@ fn handle_ingest(store: &mut Store, mut item: CapturedItem, settings: &Settings,
     let now = now_ms();
     match store.upsert(&item, blob, now) {
         Ok(outcome) => {
+            diag(format_args!(
+                "writer: upsert kind={:?} → {outcome:?}",
+                item.kind
+            ));
             let id = match outcome {
                 crate::core::model::WriteOutcome::Inserted(id) => Some(id),
                 crate::core::model::WriteOutcome::Touched(id) => Some(id),
@@ -343,10 +349,44 @@ struct App {
     /// 单实例唤醒用的注册消息。
     wake_msg: u32,
     hotkey_ok: bool,
+    /// 托盘图标创建失败（受限权限/外壳不可用）。程序照常运行，只在页脚提示。
+    tray_failed: bool,
 }
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+}
+
+/// 诊断日志：`--log <路径>` 时把关键链路写到文件。
+///
+/// 为什么需要它：剪贴板链路是"系统通知 → 取数 → 过滤 → 写线程 → 落库"五段，
+/// 任何一段静默失败，用户看到的都只是"怎么没记录"。现场排障必须能看出断在哪一段。
+/// 默认完全关闭（连文件都不打开），不影响正常运行的任何开销。
+static DIAG: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> = std::sync::OnceLock::new();
+
+/// 打开诊断日志。必须在创建窗口之前调用。
+pub fn set_diag_log(path: &str) -> std::io::Result<()> {
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let _ = DIAG.set(std::sync::Mutex::new(f));
+    diag(format_args!("=== ClipHist {} 启动 ===", crate::VERSION));
+    Ok(())
+}
+
+fn diag(args: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let Some(file) = DIAG.get() else { return };
+    if let Ok(mut f) = file.lock() {
+        let _ = writeln!(f, "{args}");
+        let _ = f.flush();
+    }
+}
+
+/// 供其它模块（如托盘）写入同一条诊断日志。
+pub(crate) fn diag_msg(args: std::fmt::Arguments<'_>) {
+    diag(args);
 }
 
 impl App {
@@ -378,6 +418,7 @@ impl App {
             target: std::ptr::null_mut(),
             wake_msg: 0,
             hotkey_ok: false,
+            tray_failed: false,
         };
         app.refresh_limits();
 
@@ -439,6 +480,10 @@ impl App {
     }
 
     fn popup_status(&self) -> Option<String> {
+        if self.tray_failed {
+            // 没有托盘就没有气泡提示，这行状态是唯一的告知途径。
+            return Some("托盘不可用".to_string());
+        }
         if self.settings.pause_capture {
             Some("已暂停".to_string())
         } else {
@@ -470,14 +515,27 @@ impl App {
     /// 采集一次剪贴板。
     fn ingest(&mut self) {
         if self.settings.pause_capture {
+            diag(format_args!("ingest: 已暂停，跳过"));
             return;
         }
         let content = clipboard::read(self.hwnd, &self.limits);
         let source = process::foreground_process_name();
+        diag(format_args!(
+            "ingest: content={content:?} source={source:?}"
+        ));
         match to_captured(content, source, &self.limits) {
-            IngestDecision::Ignore => {}
-            IngestDecision::Skip(msg) => self.balloon("未记录", msg, true),
-            IngestDecision::Store(item) => self.writer.send(DbMsg::Ingest(item)),
+            IngestDecision::Ignore => diag(format_args!("ingest: → ignore")),
+            IngestDecision::Skip(msg) => {
+                diag(format_args!("ingest: → skip（{msg}）"));
+                self.balloon("未记录", msg, true)
+            }
+            IngestDecision::Store(item) => {
+                diag(format_args!(
+                    "ingest: → store kind={:?} preview={:?}",
+                    item.kind, item.preview
+                ));
+                self.writer.send(DbMsg::Ingest(item))
+            }
         }
     }
 
@@ -748,6 +806,10 @@ impl App {
 
     fn on_clipboard_update(&mut self) {
         let seq = clipboard::sequence_number();
+        diag(format_args!(
+            "clipboard: WM_CLIPBOARDUPDATE seq={seq} suppress={:?}",
+            self.suppress_seq
+        ));
         if self.suppress_seq == Some(seq) {
             // 这次变化是我们自己写回去的：既不能记录，也不能弄丢标记。
             self.suppress_seq = None;
@@ -816,14 +878,25 @@ pub fn init_runtime(hwnd: HWND, autostart: bool) {
         // 托盘
         let tip = app.tray_tooltip();
         app.tray = Tray::add(hwnd, TRAY_ID, &tip);
+        diag(format_args!(
+            "init: tray = {}",
+            if app.tray.is_some() { "ok" } else { "FAILED" }
+        ));
         if app.tray.is_none() {
-            show_error("无法创建托盘图标，程序将退出。");
-            unsafe { PostQuitMessage(1) };
-            return;
+            // 托盘拿不到**绝不能**拖垮或阻塞整个程序：热键弹窗才是主入口。
+            //
+            // 早期版本这里弹了个模态错误框 —— 结果初始化卡在消息框上，消息循环根本没跑，
+            // 剪贴板一条都收不到（受限令牌/无外壳的环境里 100% 复现）。
+            // 现在只记下来，并在列表页脚用状态文字提示，不阻塞任何东西。
+            app.tray_failed = true;
         }
 
         // 剪贴板监听（零轮询）
-        if !clipboard::add_listener(hwnd) {
+        let listener_ok = clipboard::add_listener(hwnd);
+        diag(format_args!(
+            "init: AddClipboardFormatListener = {listener_ok}"
+        ));
+        if !listener_ok {
             show_error("无法监听剪贴板变化，程序将退出。");
             unsafe { PostQuitMessage(1) };
             return;
@@ -832,6 +905,11 @@ pub fn init_runtime(hwnd: HWND, autostart: bool) {
         // 全局热键
         let (mods, vk) = (app.settings.hotkey_mods, app.settings.hotkey_vk);
         app.hotkey_ok = hotkey::register(hwnd, hotkey::HOTKEY_SHOW, mods, vk);
+        diag(format_args!(
+            "init: RegisterHotKey({}) = {}",
+            app.settings.hotkey_text(),
+            app.hotkey_ok
+        ));
         if !app.hotkey_ok {
             let text = app.settings.hotkey_text();
             app.balloon(
@@ -908,12 +986,15 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             return 0;
         }
         WM_CLIPBOARDUPDATE => {
-            APP.with(|c| {
-                if let Ok(mut g) = c.try_borrow_mut() {
+            APP.with(|c| match c.try_borrow_mut() {
+                Ok(mut g) => {
                     if let Some(app) = g.as_mut() {
                         app.on_clipboard_update();
+                    } else {
+                        diag(format_args!("clipboard: APP 尚未初始化，丢弃"));
                     }
                 }
+                Err(_) => diag(format_args!("clipboard: APP 被占用（重入），丢弃")),
             });
             return 0;
         }

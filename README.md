@@ -23,18 +23,24 @@ Windows 便携版剪贴板历史工具：记录**文本 / 文件 / 图片**，�
 
 | 场景 | 私有提交内存 | 工作集 | 线程 | 句柄 |
 |---|---|---|---|---|
-| 空闲（空库） | **2.3 MB** | 14.6 MB | 5 | 168 |
-| 空闲（500 条历史） | **2.7 MB** | 15.0 MB | 5 | 168 |
+| 空闲（空库） | **2.0 MB** | 11.4 MB | 5 | 136 |
+| 空闲（500 条历史） | **2.3 MB** | 11.6 MB | 5 | 136 |
+| 50 次连续复制之后 | **2.6 MB** | 12.0 MB | 5 | 138 |
 
 | 指标 | 实测 |
 |---|---|
-| 预填 500 条入库 | 742 ms（1.5 ms/条），`data.db` 224 KB |
-| 查询最近 300 条 | 348 µs |
-| 关键字搜索（含正文回退） | 302 µs |
-| 产物大小 | 1686 KB |
-| 外部依赖 | 仅系统 DLL：kernel32 / user32 / gdi32 / shell32 / msimg32 / advapi32（静态 CRT，**不依赖 vcruntime140.dll**） |
+| 预填 500 条入库 | 966 ms（约 1.9 ms/条），`data.db` 224 KB |
+| 查询最近 300 条 | 406 µs |
+| 关键字搜索（含正文回退） | 327 µs |
+| 产物大小 | 1701 KB |
+| 外部依赖 | 仅系统 DLL：kernel32 / user32 / gdi32 / shell32 / msimg32 / advapi32 / dwmapi（静态 CRT，**不依赖 vcruntime140.dll**） |
 
-"500 条历史只多占 0.4 MB"不是巧合，而是设计出来的：列表只加载每条的前 200 字预览，
+> 测量环境说明：上面这组数字是无托盘状态下测的 —— 本机沙箱给子进程的是受限令牌，
+> `Shell_NotifyIcon` 被 UIPI 拒绝（`ERROR_ACCESS_DENIED`），所以图标没加上，
+> 句柄数比正常桌面少几个。程序对此已做降级（无托盘仍可运行），正常桌面上的内存
+> 会在同一量级、仅多几个句柄。
+
+"500 条历史只多占 0.3 MB"不是巧合，而是设计出来的：列表只加载每条的前 200 字预览，
 正文与图片按需读取、用完即释放；缩略图缓存上限 24 张；`data.db` 页缓存限制 512KB 并关闭内存映射。
 
 ## 快速开始
@@ -105,13 +111,16 @@ packaging/ 便携版使用说明
 ```powershell
 cargo test                                  # 124 个单元测试
 .\dist-portable\ClipHist.exe --selftest     # 存储与图片编解码自检（21 项）
-.\dist-portable\ClipHist.exe --selftest-clipboard   # 剪贴板读写自检（需桌面会话）
+.\dist-portable\ClipHist.exe --selftest-clipboard   # 剪贴板读写自检（11 项，真调 Win32）
 pwsh -File scripts\measure-memory.ps1       # 内存实测（三段采样 + 判定）
 
 # 视觉回归：用正式绘制代码把界面渲染成 PNG（不显示窗口、不碰剪贴板/数据库）
 .\dist-portable\ClipHist.exe --render-preview out.png
 .\dist-portable\ClipHist.exe --render-preview empty.png --preview-empty
 .\dist-portable\ClipHist.exe --render-settings settings.png
+
+# 排障：把"通知 → 取数 → 过滤 → 落库"五段链路写进日志
+.\dist-portable\ClipHist.exe --log clip.log
 ```
 
 ## 已知限制
@@ -120,6 +129,8 @@ pwsh -File scripts\measure-memory.ps1       # 内存实测（三段采样 + 判�
 - 目标窗口以管理员权限运行时，Windows 的 UIPI 会丢弃模拟按键：此时内容仍会放进剪贴板，
   并弹气泡提示手动按 Ctrl+V（让本程序也以管理员身份运行可解决）。
 - 默认热键 `Alt+V`（避开被系统占用的 `Win+V` 与编辑器里的 `Ctrl+Shift+V`），可在设置里改。
+- **托盘图标创建失败时程序不会退出**：热键弹窗照常可用，列表页脚会显示"托盘不可用"。
+  （受限令牌、无桌面外壳或被安全软件拦截时 `Shell_NotifyIcon` 会返回 `ERROR_ACCESS_DENIED`。）
 - `data.db` 是**明文**存储的，剪贴板里可能有密码、验证码，请勿分享该文件。
 
 ## 许可

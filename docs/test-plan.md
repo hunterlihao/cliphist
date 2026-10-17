@@ -9,9 +9,10 @@
 |---|---|---|---|
 | 单元测试 | `cargo test` | 124 个用例：纯逻辑与纯编解码 | 无（只要文件系统） |
 | 存储/编解码自检 | `ClipHist.exe --selftest` | 21 项：建库、去重、文件条目、图片、搜索、保留策略、设置持久化 | 无 |
-| 剪贴板自检 | `ClipHist.exe --selftest-clipboard` | 6 项：真调 `OpenClipboard` / `SetClipboardData` 的文本、`CF_HDROP`、`CF_DIBV5`、注册 PNG、忽略标记 | 交互式桌面会话 |
+| 剪贴板自检 | `ClipHist.exe --selftest-clipboard` | 11 项：真调 `OpenClipboard` / `SetClipboardData` 的文本、`CF_HDROP`、`CF_DIBV5`、注册 PNG、忽略标记 | 交互式桌面会话 |
 | 界面渲染预览 | `ClipHist.exe --render-preview out.png` / `--render-settings out.png` | 用**正式绘制代码**把弹窗/设置窗口渲成 PNG，可加 `--preview-empty`、`--preview-query` | 无 |
-| 内存实测 | `pwsh -File scripts\measure-memory.ps1` | 空库 / 预填 500 条 / 剪贴板 soak 三段采样与判定 | 第二部分需要 exe，第三部分需要剪贴板 |
+| 采集链路诊断 | `ClipHist.exe --log clip.log` | 把"通知 → 取数 → 过滤 → 入库"五段全部写进日志，用于现场排障与端到端验证 | 无 |
+| 内存实测 | `pwsh -File scripts\measure-memory.ps1` | 空库 / 预填 500 条 / 剪贴板 soak 三段采样与判定 | 第三部分需要剪贴板 |
 
 界面预览这一层是本项目"看得见"的基础：原生 GUI 没法靠浏览器迭代，
 而 `--render-preview` 渲的就是同一份 `render()`，所以截图即真实画面。
@@ -52,20 +53,59 @@
 写入图片（DIBV5 + PNG） · PNG 通道无损 · 忽略标记生效
 ```
 
-## 4. 本环境无法验证的部分（如实记录）
+## 4. 采集链路的实测证据（以及本环境真的测不了的部分）
 
-当前开发会话是一个受限沙箱，**剪贴板不可用**，证据链如下：
+### 4.1 已经实测通过的（本机、当前环境）
 
-1. `Set-Clipboard -Value <随机串>` 之后 `Get-Clipboard` 回读为空；
-2. `System.Windows.Forms.Clipboard::SetImage` 抛"所请求的剪贴板操作失败"；
-3. `ClipHist.exe --selftest-clipboard` 在 `OpenClipboard` 重试 5 次后仍失败，
-   程序如实报告"剪贴板不可用"并以退出码 8 结束（而不是伪装通过）；
-4. 因此 `measure-memory.ps1` 的第三段 soak 自动降级为"未执行"，同样不伪造数据。
+剪贴板链路是"系统通知 → 取数 → 过滤 → 写线程 → 落库"五段，用 `--log` 诊断日志
+逐段验证过（日志原文见下）。三类内容都真的落进了 `data.db`：
 
-结论：**剪贴板采集与回写的运行时行为、以及真实粘贴链路，只能靠
-[手工验收清单](manual-checklist.md) 在正常桌面会话里确认。**
-其中字节级布局（HDROP/DIB/PNG/忽略标记）已由单元测试与自检覆盖，
-未覆盖的是"系统是否真的把内容交给了我们"这一层。
+```
+clipboard: WM_CLIPBOARDUPDATE seq=511 suppress=None
+ingest: content=Text("端到端文本 E2E-715156551 中文与 emoji 🎯") source=Some("DeepSeek Harness.exe")
+ingest: → store kind=Text preview="端到端文本 E2E-715156551 中文与 emoji 🎯"
+writer: upsert kind=Text → Inserted(1)
+clipboard: WM_CLIPBOARDUPDATE seq=517
+ingest: content=Files { paths: ["...\\drop-test.txt"], is_cut: false }
+writer: upsert kind=Files → Inserted(2)
+clipboard: WM_CLIPBOARDUPDATE seq=519
+ingest: content=Files { paths: ["...\\drop-test.txt"], is_cut: false }
+writer: upsert kind=Files → Touched(2)          ← 重复内容正确去重
+```
+
+图片（`Clipboard::SetImage` 放入 160×90 位图）：
+
+```
+items 里出现 kind=2, img_w=160, img_h=90, thumb_state=1, blob=543 B, thumb=557 B
+```
+
+回写链路（`--selftest-clipboard`，真调 `SetClipboardData` 再读回来）：**11 项全通过** ——
+文本往返、`CF_HDROP` 往返、`DIBV5` 逐像素一致、注册 PNG 无损、"请勿记录"标记生效。
+
+### 4.2 仍然测不了的：交互流与托盘
+
+| 项 | 为什么测不了 | 怎么办 |
+|---|---|---|
+| 热键 → 弹窗 → 单击 → 自动粘贴到别的程序 | 需要驱动真实键盘/鼠标与前台窗口 | 手工清单 A/B/C/D/F 组 |
+| 托盘图标与托盘菜单 | 本沙箱给子进程的是**受限令牌**，`Shell_NotifyIcon(NIM_ADD)` 返回 `ERROR_ACCESS_DENIED(5)`（UIPI 拦住了向 Explorer 托盘窗口发消息） | 手工清单 A4/A5/F 组；代码已降级为"无托盘仍可运行，页脚提示" |
+| 多显示器 / DPI 切换 / 管理员窗口降级 | 同上 | 手工清单 K6/K7/F4 |
+
+### 4.3 这轮验证抓到的一个真 bug
+
+第一轮实测发现"应用在跑、剪贴板正常、却一条都没记下来"。诊断日志给出根因：
+
+```
+tray: NIM_ADD = 0 (lastError=5)     ← 托盘创建失败
+init: tray = FAILED
+（没有后续任何 clipboard 行）
+```
+
+旧代码在托盘失败时弹**模态错误框**并准备退出 —— 模态框把初始化卡死，
+消息循环根本没开始跑，于是剪贴板通知一条也处理不了。
+现在托盘失败只记录并继续运行（列表页脚显示"托盘不可用"），
+`--log` 则把五段链路全部留痕，现场排障不用再猜。
+
+这也说明：**"没有报错"不等于"链路通"** —— 只有端到端落库才算数。
 
 ## 5. 回归重点
 

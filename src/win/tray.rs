@@ -49,11 +49,20 @@ pub struct Tray {
 
 impl Tray {
     /// 创建并添加托盘图标。`icon` 为 `None` 时用系统默认应用程序图标。
+    ///
+    /// 顺序按 MSDN 的建议：先 `NIM_ADD`（只带最基本的三个标志），再 `NIM_SETVERSION`
+    /// 声明 V4 行为，最后 `NIM_MODIFY` 补上 `NIF_SHOWTIP`。
+    /// `NIF_SHOWTIP` 只有在 V4 行为下才有意义，直接塞进 `NIM_ADD` 会被系统拒绝整个添加。
     pub fn add(hwnd: HWND, id: u32, tooltip: &str) -> Option<Tray> {
         let (icon, owns_icon) = match create_app_icon() {
             Some(ic) => (ic, true),
             None => (load_stock_icon(), false),
         };
+        crate::app::diag_msg(format_args!(
+            "tray: icon = {} (owns={owns_icon}, null={})",
+            if owns_icon { "自绘" } else { "系统默认" },
+            icon.is_null()
+        ));
         let mut tray = Tray {
             hwnd,
             id,
@@ -63,16 +72,35 @@ impl Tray {
             added: false,
         };
 
-        let mut nid = tray.base(NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP);
-        if unsafe { Shell_NotifyIconW(NIM_ADD, &nid) } == 0 {
-            return None;
+        // ① 只带 NIF_MESSAGE | NIF_ICON | NIF_TIP
+        let mut nid = tray.base(NIF_MESSAGE | NIF_ICON | NIF_TIP);
+        let added = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) };
+        crate::app::diag_msg(format_args!(
+            "tray: NIM_ADD = {added} (cbSize={} lastError={})",
+            nid.cbSize,
+            unsafe { windows_sys::Win32::Foundation::GetLastError() }
+        ));
+        if added == 0 {
+            // 兜底重试一次：外壳刚启动/正忙时 Shell_NotifyIcon 会偶发失败。
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let added = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) };
+            crate::app::diag_msg(format_args!("tray: NIM_ADD 重试 = {added}"));
+            if added == 0 {
+                return None;
+            }
         }
         tray.added = true;
 
-        // 声明使用 V4 行为：回调里 wParam/lParam 才是"坐标 + 事件"的编码方式。
+        // ② 声明 V4 行为：之后回调里 wParam/lParam 才是"坐标 + 事件"的编码方式。
         nid.uFlags = 0;
         nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-        unsafe { Shell_NotifyIconW(NIM_SETVERSION, &nid) };
+        let ver = unsafe { Shell_NotifyIconW(NIM_SETVERSION, &nid) };
+        crate::app::diag_msg(format_args!("tray: NIM_SETVERSION = {ver}"));
+
+        // ③ 补上"显示提示"标志
+        let nid = tray.base(NIF_SHOWTIP);
+        let tip = unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) };
+        crate::app::diag_msg(format_args!("tray: NIM_MODIFY(NIF_SHOWTIP) = {tip}"));
         Some(tray)
     }
 

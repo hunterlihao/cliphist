@@ -123,6 +123,13 @@ fn main() -> ExitCode {
         return render_settings_cmd(&out);
     }
 
+    // 诊断日志：GUI 模式下把采集链路写进文件，用于现场排障（默认完全关闭）。
+    if let Some(path) = flag_value("--log") {
+        if let Err(e) = cliphist::app::set_diag_log(&path) {
+            eprintln!("无法打开诊断日志 {path}：{e}");
+        }
+    }
+
     // ① DPI 感知必须在创建任何窗口之前设置：否则整个界面会被系统按位图拉伸，中文发虚。
     cliphist::win::dpi::set_process_dpi_awareness();
 
