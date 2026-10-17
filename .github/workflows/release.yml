@@ -1,0 +1,90 @@
+name: Release
+
+# 打 tag 即出包：git tag v0.1.3 && git push origin v0.1.3
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  # gh release create 需要写 contents
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 校验 tag 与 Cargo.toml 版本一致
+        shell: pwsh
+        run: |
+          $line = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $line) { throw "Cargo.toml 里找不到 version" }
+          $ver = $line.Matches[0].Groups[1].Value
+          $tag = $env:GITHUB_REF_NAME -replace '^v', ''
+          if ($ver -ne $tag) {
+            throw "Cargo.toml 版本是 $ver，tag 是 $($env:GITHUB_REF_NAME) —— 先改版本号再打 tag"
+          }
+          "版本一致：$ver"
+
+      - name: 单元测试
+        run: cargo test --all
+
+      - name: Release 构建
+        run: cargo build --release --locked
+
+      - name: 自检（存储与图片编解码）
+        run: .\target\x86_64-pc-windows-msvc\release\ClipHist.exe --selftest
+
+      - name: 打包便携版
+        shell: pwsh
+        run: |
+          # 与 scripts/build.ps1 保持同一套布局：exe + 使用说明，不带 data.db
+          $stage = "stage\ClipHist"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target\x86_64-pc-windows-msvc\release\ClipHist.exe" $stage
+          Copy-Item "packaging\使用说明.txt" $stage
+          $zip = "ClipHist-$env:GITHUB_REF_NAME-portable.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
+          $kb = [math]::Round((Get-Item $zip).Length / 1KB, 1)
+          "打包完成：$zip ($kb KB)"
+          Get-ChildItem $stage | Select-Object Name, Length
+
+      - name: 发布到 GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $zip = "ClipHist-$env:GITHUB_REF_NAME-portable.zip"
+          $title = "ClipHist " + ($env:GITHUB_REF_NAME -replace '^v', '')
+
+          # 变更列表：上一个 tag 到本次 tag 的提交（没有上一个 tag 就全列）
+          $prev = (git describe --tags --abbrev=0 "HEAD^" 2>$null)
+          if ($LASTEXITCODE -eq 0 -and $prev) {
+            $range = "$prev..HEAD"
+            $since = "相对 $prev 的变更"
+          } else {
+            $range = "HEAD"
+            $since = "包含的全部变更"
+          }
+          $lines = git log --pretty=format:'- %s' $range
+          $notes = @(
+            "## $since",
+            "",
+            $lines,
+            "",
+            "## 安装",
+            "",
+            "下载下方 ``*-portable.zip`` 解压即用（Windows 10 1809+ / Windows 11），",
+            "不需要安装、不需要运行时。所有数据保存在程序同目录的 ``data.db`` 里。",
+            "",
+            "## 校验",
+            "",
+            "本包由 GitHub Actions 在干净的 Windows runner 上构建：单元测试与 ``--selftest`` 全部通过后才产出。"
+          ) -join "`n"
+          $notes | Out-File -FilePath notes.md -Encoding utf8
+          gh release create $env:GITHUB_REF_NAME $zip --title $title --notes-file notes.md
