@@ -149,3 +149,7 @@ pwsh -File scripts\measure-memory.ps1       # 内存实测（三段采样 + 判�
 ## 许可
 
 MIT
+
+## 许可证
+
+[MIT](LICENSE) © 2026 hunterlihao
