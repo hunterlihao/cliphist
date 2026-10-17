@@ -82,6 +82,28 @@ items 里出现 kind=2, img_w=160, img_h=90, thumb_state=1, blob=543 B, thumb=55
 回写链路（`--selftest-clipboard`，真调 `SetClipboardData` 再读回来）：**11 项全通过** ——
 文本往返、`CF_HDROP` 往返、`DIBV5` 逐像素一致、注册 PNG 无损、"请勿记录"标记生效。
 
+### 4.1.1 本轮新增的运行时验证（主窗口 / 热键）
+
+把热键写进 `data.db`（`hotkey.mods=1, hotkey.vk=32`）后启动，诊断日志给出：
+
+```
+init: RegisterHotKey(Alt+空格) = true
+```
+
+即 **Alt+空格 能被注册**（它不属于系统保留组合，PowerToys Run 用的也是它）。
+再用 `keybd_event` 注入 Alt+空格，浮动列表在一个轮次里确实被呼出（460 宽，出现在光标附近）；
+注入在受限令牌下会被 UIPI 有条件拦截，所以这一项只作为"能通"的证据，不作为稳定回归。
+
+主窗口用"给控制器窗口发一条托盘单击的编码消息"验证（`PostMessage(ClipHist.Ctl, WM_APP+1, 0, WM_LBUTTONUP)`）：
+
+```
+控制器: Pid 16356 ClipHist.Ctl
+之后的列表窗口: Hwnd 1509696  Visible=True  X=473  Y=199  W=760  H=620
+```
+
+工作区宽 1706、高 1018 → 期望左上角 (473, 199)，实测完全一致：
+**主窗口确实在屏幕上绝对居中**，不是"大概居中"。
+
 ### 4.2 仍然测不了的：交互流与托盘
 
 | 项 | 为什么测不了 | 怎么办 |
