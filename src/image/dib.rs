@@ -328,7 +328,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn zero_masks_fall_back_to_default_bgra() {
         // 截图工具常见的写法：V5 头（124 字节），但 RGB 掩码字段全 0。
         // 照掩码取值会得到全黑，必须回落到默认 BGRA 布局。
