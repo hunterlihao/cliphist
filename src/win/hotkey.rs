@@ -9,6 +9,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 
 /// 主热键 id。
 pub const HOTKEY_SHOW: i32 = 1;
+/// 探测用 id：设置窗口拿它试注册一次，用来在改键当下就告诉用户"这个组合键能不能用"。
+pub const HOTKEY_PROBE: i32 = 2;
 
 /// 注册全局热键。
 ///

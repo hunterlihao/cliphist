@@ -12,7 +12,7 @@ use std::mem::zeroed;
 
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, GetMonitorInfoW, MonitorFromPoint, HDC, MONITORINFO,
+    BeginPaint, EndPaint, GetMonitorInfoW, MonitorFromPoint, ScreenToClient, HDC, MONITORINFO,
     MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, WHITE_BRUSH,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -22,12 +22,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
     GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
     LoadCursorW, MoveWindow, PostMessageW, RegisterClassExW, SendMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CS_DROPSHADOW,
-    CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_LEFT, HWND_TOPMOST, IDC_ARROW, SWP_SHOWWINDOW,
-    SW_HIDE, SW_SHOW, WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_CTLCOLOREDIT, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WM_SYSKEYDOWN, WNDCLASSEXW,
-    WNDPROC, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CS_DBLCLKS,
+    CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_LEFT, HTCAPTION, HTCLIENT,
+    HWND_TOPMOST, IDC_ARROW, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_ACTIVATE, WM_APP, WM_CHAR,
+    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCHITTEST,
+    WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WM_SYSKEYDOWN, WNDCLASSEXW, WNDPROC, WS_CHILD,
+    WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::core::model::{ItemRow, Kind};
@@ -37,6 +38,33 @@ use crate::ui::timefmt;
 use crate::win::strings::{from_wide_until_nul, to_wide};
 
 pub const CLASS_NAME: &str = "ClipHist.Popup";
+
+/// 主窗口 → 控制器：请打开设置（标题栏上的"设置"按钮）。
+pub const WM_LIST_OPEN_SETTINGS: u32 = WM_APP + 17;
+
+/// 窗口的两种身份。
+///
+/// 两者**共用同一个窗口类与同一份绘制代码**：主窗口只是多一条标题栏、宽度更大、
+/// 高度固定，并且打开时在屏幕上绝对居中 —— 而不是跟着鼠标跑。
+/// 这样列表的排版、命中测试、滚动、缩略图逻辑一处修改两边同时生效。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Popup,
+    Main,
+}
+
+impl Mode {
+    fn metrics(self, dpi: u32) -> Metrics {
+        match self {
+            Mode::Popup => Metrics::new(dpi),
+            Mode::Main => Metrics::main_window(dpi),
+        }
+    }
+}
+
+/// 用静态地址当"主窗口模式"的标记：`CreateWindowExW` 的 lpCreateParams 只有一格，
+/// 传非法指针是不干净的做法，指一个静态字节则完全合法。
+static MAIN_MODE_TAG: u8 = 1;
 const EDIT_CLASS: &str = "EDIT";
 const EDIT_ID: usize = 101;
 
@@ -157,20 +185,20 @@ impl ListNav {
 
 /// 点击 y 坐标 → 行号。
 pub fn row_at(m: &Metrics, top: usize, y: i32) -> Option<usize> {
-    if y < m.header_h {
+    if y < m.list_top() {
         return None;
     }
     let list_h = m.list_height();
-    if y >= m.header_h + list_h {
+    if y >= m.list_top() + list_h {
         return None;
     }
-    let idx = top + ((y - m.header_h) / m.row_h) as usize;
+    let idx = top + ((y - m.list_top()) / m.row_h) as usize;
     Some(idx)
 }
 
 /// 单行矩形。
 pub fn row_rect(m: &Metrics, top: usize, index: usize) -> RECT {
-    let y0 = m.header_h + (index as i32 - top as i32) * m.row_h;
+    let y0 = m.list_top() + (index as i32 - top as i32) * m.row_h;
     rect(0, y0, m.width, y0 + m.row_h)
 }
 
@@ -254,6 +282,7 @@ struct PopupState {
     edit_old_proc: isize,
     fonts: Fonts,
     metrics: Metrics,
+    mode: Mode,
     mem: Option<MemDc>,
     nav: ListNav,
     rows: Vec<ItemRow>,
@@ -279,9 +308,9 @@ static SUPPRESS_EN_CHANGE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 impl PopupState {
-    fn new(hwnd: HWND, owner: HWND) -> PopupState {
+    fn new(hwnd: HWND, owner: HWND, mode: Mode) -> PopupState {
         let dpi = unsafe { GetDpiForWindow(hwnd) };
-        let metrics = Metrics::new(if dpi == 0 { 96 } else { dpi });
+        let metrics = mode.metrics(if dpi == 0 { 96 } else { dpi });
         PopupState {
             hwnd,
             owner,
@@ -289,6 +318,7 @@ impl PopupState {
             edit_old_proc: 0,
             fonts: Fonts::create(&metrics),
             metrics,
+            mode,
             mem: None,
             nav: ListNav::new(0),
             rows: Vec::new(),
@@ -366,7 +396,7 @@ impl PopupState {
         }
         let m = &self.metrics;
         let line = m.fs_preview + m.gap;
-        let top = (m.header_h - line) / 2;
+        let top = m.title_h + (m.header_h - line) / 2;
         let left = m.pad + m.mark;
         unsafe {
             MoveWindow(
@@ -395,6 +425,23 @@ impl PopupState {
     /// 让窗口高度贴合内容，并在光标附近定位（自动避开屏幕边缘）。
     fn place(&mut self) {
         let m = self.metrics;
+        if self.mode == Mode::Main {
+            // 主窗口：屏幕**绝对居中**、固定大小。这是它和浮动列表最大的区别 ——
+            // 浮动列表跟着光标走（要快），主窗口固定在视觉中心（要稳）。
+            let (x, y) = crate::win::screen::center_on_primary(m.width, m.max_height);
+            unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    HWND_TOPMOST,
+                    x,
+                    y,
+                    m.width,
+                    m.max_height,
+                    SWP_SHOWWINDOW,
+                )
+            };
+            return;
+        }
         let h = m.height_for(self.rows.len());
         let mut pt = POINT { x: 0, y: 0 };
         unsafe { GetCursorPos(&mut pt) };
@@ -469,6 +516,7 @@ impl PopupState {
         let paper = rect(0, 0, w, h);
         gdi::fill(dc, &paper, color::PAPER);
 
+        self.render_title(dc, w);
         self.render_header(dc, w);
         self.render_list(dc, w, h);
         self.render_footer(dc, w, h);
@@ -483,13 +531,60 @@ impl PopupState {
         }
     }
 
+    /// 主窗口标题栏：标题 + 设置 + 关闭。弹窗模式（title_h == 0）什么都不画。
+    ///
+    /// 不用系统标题栏（WS_CAPTION）：那套框架和这份排版语言完全不搭。
+    /// 拖动靠 WM_NCHITTEST 返回 HTCAPTION 实现，成本只有几行。
+    fn render_title(&self, dc: HDC, w: i32) {
+        let m = self.metrics;
+        if m.title_h == 0 {
+            return;
+        }
+        let title_rc = rect(m.pad, 0, w - 2 * m.title_h, m.title_h);
+        gdi::text(
+            dc,
+            self.fonts.ui,
+            color::INK,
+            &title_rc,
+            crate::APP_TITLE,
+            false,
+        );
+        gdi::text(
+            dc,
+            self.fonts.meta,
+            color::INK2,
+            &self.settings_rect(),
+            "设置",
+            true,
+        );
+        gdi::text(
+            dc,
+            self.fonts.ui,
+            color::INK3,
+            &self.close_rect(),
+            "✕",
+            true,
+        );
+        gdi::hline(dc, 0, w, m.title_h - 1, color::RULE);
+    }
+
+    fn close_rect(&self) -> RECT {
+        let m = self.metrics;
+        rect(m.width - m.title_h, 0, m.width, m.title_h)
+    }
+
+    fn settings_rect(&self) -> RECT {
+        let m = self.metrics;
+        rect(m.width - 2 * m.title_h, 0, m.width - m.title_h, m.title_h)
+    }
+
     /// 顶部：一个等宽的字段名 + 一行输入 + 一条实线。
     ///
     /// 没有输入框边框、没有浅灰底色 —— 那会让顶部看起来像"控制面板"。
     /// 这里要的是"在纸上写一行字"，所以只有文字和它下面的那条地面线。
     fn render_header(&self, dc: HDC, w: i32) {
         let m = self.metrics;
-        let label_rc = rect(m.pad, 1, m.pad + m.mark, m.header_h - 2);
+        let label_rc = rect(m.pad, m.title_h + 1, m.pad + m.mark, m.list_top() - 2);
         gdi::text(dc, self.fonts.badge, color::INK3, &label_rc, "搜索", false);
         // 预览模式：子窗口（EDIT）不参与离屏渲染，这里代画输入框内容 ——
         // 空字符串就画一根光标，让预览图能表达"这里可以打字"。
@@ -497,24 +592,27 @@ impl PopupState {
             let input_left = m.pad + m.mark;
             if text.is_empty() {
                 let caret_h = (m.fs_preview + 4).min(m.header_h - 10);
-                let y = (m.header_h - caret_h) / 2;
+                let y = m.title_h + (m.header_h - caret_h) / 2;
                 gdi::fill(
                     dc,
                     &rect(input_left, y, input_left + 1, y + caret_h),
                     color::INK,
                 );
             } else {
-                let input_rc = rect(input_left, 1, w - m.pad, m.header_h - 2);
+                let input_rc = rect(input_left, m.title_h + 1, w - m.pad, m.list_top() - 2);
                 gdi::text(dc, self.fonts.ui, color::INK, &input_rc, text, false);
             }
         }
         // 字段的"地面"线：贯穿整个宽度，让顶部像一条真实的横栏。
-        gdi::hline(dc, 0, w, m.header_h - 1, color::RULE_STRONG);
+        gdi::hline(dc, 0, w, m.list_top() - 1, color::RULE_STRONG);
     }
 
-    /// 元信息行：类型补充 · 来源进程 · 使用次数。
+    /// 元信息行：置顶标记 · 类型补充 · 来源进程 · 使用次数。
     fn meta_text(&self, row: &ItemRow) -> String {
         let mut parts: Vec<String> = Vec::new();
+        if row.pinned {
+            parts.push("置顶".to_string());
+        }
         match row.kind {
             Kind::Files if row.file_count > 0 => parts.push(format!("{} 个文件", row.file_count)),
             Kind::Image if row.img_w > 0 && row.img_h > 0 => {
@@ -554,42 +652,23 @@ impl PopupState {
             let hovered = self.hover == Some(idx);
 
             if selected {
-                gdi::fill(dc, &rc, color::SEL_BG);
+                // 选中不改变底色（整行仍是纸白），只在最左侧画一道墨条。
+                // 反相黑块会压掉文字，浅灰底等于"另一种底色" —— 你两个都不要。
+                let edge = (m.dpi as i32 / 32).max(3);
+                gdi::fill(dc, &rect(0, rc.top, edge, rc.bottom), color::SEL_EDGE);
             } else if hovered {
                 gdi::fill(dc, &rc, color::HOVER);
             }
 
-            let fg = if selected { color::SEL_FG } else { color::INK };
-            let fg2 = if selected {
-                color::SEL_FG2
-            } else {
-                color::INK2
-            };
-            let fg3 = if selected {
-                color::SEL_FG2
-            } else {
-                color::INK3
-            };
-            let mark_color = if selected {
-                color::SEL_FG2
-            } else {
-                color::INK3
-            };
+            // 选中不再改变文字颜色：墨色始终是墨色。
+            let fg = color::INK;
+            let fg2 = color::INK2;
+            // 时间是唯一随选中微微加深的元素（三级灰→二级灰），作为第二重线索。
+            let fg3 = if selected { color::INK2 } else { color::INK3 };
+            let mark_color = color::INK3;
 
-            // 置顶：外边距里一道短墨条，像夹在书页里的书签 —— 不占正文空间，
-            // 也不会和缩略图抢位置。反相时翻成纸色，保证选中行上仍然可见。
-            if row.pinned {
-                let bar_w = (m.dpi as i32 / 30).max(4);
-                let inset = (m.row_h / 4).max(8);
-                // 放在 x=4：贴着窗沿会像滚动条碎块；比文件夹轮廓粗一档，
-                // 两者就不会在同一个边距里互相干扰。
-                let x = (m.pad / 4).max(4);
-                gdi::fill(
-                    dc,
-                    &rect(x, rc.top + inset, x + bar_w, rc.bottom - inset),
-                    if selected { color::SEL_FG } else { color::INK },
-                );
-            }
+            // 置顶不再画几何标记：它和选中墨条会挤在同一个外边距里互相干扰，
+            // 现在写进元信息行（"置顶 · chrome.exe · …"），用文字表达。
 
             // 左侧标记区：图片=缩略图，文件=文件夹轮廓，文本=**留空**。
             // 文本行空着是刻意的：十行里八个"文本"方块只是噪声，眼睛要先把它们滤掉。
@@ -638,8 +717,8 @@ impl PopupState {
             );
             gdi::text(dc, self.fonts.meta, fg2, &meta_rc, &meta, false);
 
-            // 行分隔：从外边距到外边距的发丝线（选中行不需要，它自己有墨块分隔）
-            if !selected && idx + 1 < end {
+            // 行分隔：从外边距到外边距的发丝线（选中行是浅灰底，发丝线照样看得见）
+            if idx + 1 < end {
                 gdi::hline(dc, m.pad, w - m.pad, rc.bottom - 1, color::RULE);
             }
         }
@@ -654,7 +733,7 @@ impl PopupState {
     /// （这个 bug 正是靠离屏预览图发现的）。
     fn render_empty(&self, dc: HDC, w: i32, h: i32) {
         let m = self.metrics;
-        let area = rect(m.pad, m.header_h, w - m.pad, h - m.footer_h);
+        let area = rect(m.pad, m.list_top(), w - m.pad, h - m.footer_h);
         let (title, hint) = if self.query.is_empty() {
             ("还没有历史记录", "复制任意内容后就会出现在这里")
         } else {
@@ -693,9 +772,9 @@ impl PopupState {
         if self.rows.len() <= vis {
             return;
         }
-        let list_top = m.header_h + 2;
+        let list_top = m.list_top() + 2;
         // 同样用真实窗口高度，而不是"最大高度"。
-        let list_h = (h - m.footer_h - m.header_h - 4).max(8);
+        let list_h = (h - m.footer_h - m.list_top() - 4).max(8);
         let track_x = w - m.pad / 2 - m.scrollbar_w;
         gdi::fill(
             dc,
@@ -722,7 +801,7 @@ impl PopupState {
     fn render_footer(&self, dc: HDC, w: i32, h: i32) {
         let m = self.metrics;
         let top = h - m.footer_h;
-        if top <= m.header_h {
+        if top <= m.list_top() {
             return;
         }
         gdi::hline(dc, 0, w, top, color::RULE);
@@ -783,7 +862,7 @@ pub fn register_class(hinstance: HINSTANCE) -> bool {
     let cls = to_wide(CLASS_NAME);
     let mut wc: WNDCLASSEXW = unsafe { zeroed() };
     wc.cbSize = std::mem::size_of::<WNDCLASSEXW>() as u32;
-    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW | CS_DBLCLKS;
     wc.lpfnWndProc = Some(wnd_proc);
     wc.hInstance = hinstance;
     wc.hCursor = unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) };
@@ -795,9 +874,13 @@ pub fn register_class(hinstance: HINSTANCE) -> bool {
 }
 
 /// 创建弹窗（初始隐藏）。`owner` 为控制器窗口。
-pub fn create(owner: HWND, hinstance: HINSTANCE) -> Option<HWND> {
+pub fn create(owner: HWND, hinstance: HINSTANCE, mode: Mode) -> Option<HWND> {
     let cls = to_wide(CLASS_NAME);
     let title = to_wide(crate::APP_TITLE);
+    let params = match mode {
+        Mode::Popup => std::ptr::null(),
+        Mode::Main => &MAIN_MODE_TAG as *const u8 as *const core::ffi::c_void,
+    };
     let hwnd = unsafe {
         CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
@@ -811,7 +894,7 @@ pub fn create(owner: HWND, hinstance: HINSTANCE) -> Option<HWND> {
             owner,
             std::ptr::null_mut(),
             hinstance,
-            std::ptr::null(),
+            params,
         )
     };
     if hwnd.is_null() {
@@ -937,6 +1020,32 @@ unsafe fn key_outcome(hwnd: HWND, vk: usize) -> (Outcome, bool) {
     }
 }
 
+/// 鼠标点在某一行上：选中它；`activate` 为真时再"选择并粘贴"。
+///
+/// 单击/双击共用这一段，差异只有 `activate` 一个参数 ——
+/// 免得两处命中测试各写一遍、日后改一处忘一处。
+unsafe fn activate_row(hwnd: HWND, y: i32, activate: bool) -> Outcome {
+    let Some(st) = state(hwnd) else {
+        return Outcome::None;
+    };
+    match row_at(&st.metrics, st.nav.top, y) {
+        Some(idx) if idx < st.rows.len() => {
+            st.nav.select(&st.metrics, idx);
+            st.hover = Some(idx);
+            if activate {
+                let id = st.rows[idx].id;
+                Outcome::Choose {
+                    id,
+                    clipboard_only: is_down(VK_SHIFT),
+                }
+            } else {
+                Outcome::Redraw
+            }
+        }
+        _ => Outcome::None,
+    }
+}
+
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_NCCREATE => {
@@ -946,7 +1055,13 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             } else {
                 (*cs).hwndParent
             };
-            let state = Box::new(PopupState::new(hwnd, owner));
+            // lpCreateParams 非空即表示"主窗口模式"（见 MAIN_MODE_TAG）。
+            let mode = if cs.is_null() || (*cs).lpCreateParams.is_null() {
+                Mode::Popup
+            } else {
+                Mode::Main
+            };
+            let state = Box::new(PopupState::new(hwnd, owner, mode));
             SetWindowLongPtrW(
                 hwnd,
                 windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
@@ -1032,25 +1147,60 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             }
             return 0;
         }
-        WM_LBUTTONDOWN => {
-            // 单击即粘贴（与 Win+V 一致）。
-            let out = if let Some(st) = state(hwnd) {
-                let y = hiword(lp);
-                match row_at(&st.metrics, st.nav.top, y) {
-                    Some(idx) if idx < st.rows.len() => {
-                        st.nav.select(&st.metrics, idx);
-                        st.hover = Some(idx);
-                        let id = st.rows[idx].id;
-                        Outcome::Choose {
-                            id,
-                            clipboard_only: is_down(VK_SHIFT),
-                        }
+        WM_NCHITTEST => {
+            // 主窗口没有系统标题栏，但拖动必须保留：标题栏那一横条整片返回 HTCAPTION，
+            // 剩下的区域交给客户区自己处理。
+            let m = state(hwnd).map(|st| st.metrics);
+            if let Some(m) = m {
+                if m.title_h > 0 {
+                    let mut pt = POINT {
+                        x: loword(lp),
+                        y: hiword(lp),
+                    };
+                    unsafe { ScreenToClient(hwnd, &mut pt) };
+                    if pt.y >= 0 && pt.y < m.title_h {
+                        return HTCAPTION as isize;
                     }
-                    _ => Outcome::None,
                 }
-            } else {
-                Outcome::None
-            };
+            }
+            return HTCLIENT as isize;
+        }
+        WM_LBUTTONDOWN => {
+            // 主窗口的标题栏按钮：先算命中（拿到纯值），再动作 —— 因为
+            // hide() 会同步派发消息，动作期间不能还握着 &mut PopupState。
+            let hit = state(hwnd).map(|st| {
+                let m = st.metrics;
+                (m.title_h, st.settings_rect(), st.close_rect(), st.owner)
+            });
+            if let Some((title_h, settings_rc, close_rc, owner)) = hit {
+                if title_h > 0 {
+                    let (x, y) = (loword(lp), hiword(lp));
+                    if y < title_h {
+                        let inside = |r: &RECT| x >= r.left && x < r.right;
+                        if inside(&close_rc) {
+                            hide(hwnd);
+                        } else if inside(&settings_rc) && !owner.is_null() {
+                            unsafe { PostMessageW(owner, WM_LIST_OPEN_SETTINGS, 0, 0) };
+                        }
+                        return 0;
+                    }
+                }
+            }
+
+            // 命中行的语义按窗口身份分开：
+            // - 浮动列表：单击即粘贴（与 Win+V 一致，快是唯一目的）
+            // - 主窗口：单击只选中，双击/回车才粘贴（用户可能只是在翻着看）
+            // 浮动列表：单击即粘贴；主窗口：单击只选中（双击才粘贴）。
+            let activate = state(hwnd)
+                .map(|st| st.mode == Mode::Popup)
+                .unwrap_or(false);
+            let out = activate_row(hwnd, hiword(lp), activate);
+            dispatch(hwnd, out);
+            return 0;
+        }
+        WM_LBUTTONDBLCLK => {
+            // 只有主窗口会走到这里（浮动列表单击就已经粘贴并关窗了）。
+            let out = activate_row(hwnd, hiword(lp), true);
             dispatch(hwnd, out);
             return 0;
         }
@@ -1304,6 +1454,10 @@ fn read_edit_text(edit: HWND) -> String {
 }
 
 /// `lParam` 高 16 位（鼠标 y 坐标，有符号）。
+fn loword(lp: LPARAM) -> i32 {
+    (lp as u32 & 0xFFFF) as u16 as i16 as i32
+}
+
 fn hiword(lp: LPARAM) -> i32 {
     ((lp as u32 >> 16) & 0xFFFF) as u16 as i16 as i32
 }

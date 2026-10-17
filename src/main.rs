@@ -91,6 +91,7 @@ fn main() -> ExitCode {
         || has("--bench-fill")
         || has("--render-preview")
         || has("--render-settings")
+        || has("--render-splash")
         || has("--version")
         || has("-v")
         || has("--help")
@@ -117,10 +118,21 @@ fn main() -> ExitCode {
         return bench_fill(n.unwrap_or(500), flag_value("--log"));
     }
     if let Some(out) = flag_value("--render-preview") {
-        return render_preview_cmd(&out, has("--preview-empty"), flag_value("--preview-query"));
+        return render_preview_cmd(
+            &out,
+            has("--preview-empty"),
+            flag_value("--preview-query"),
+            has("--preview-main"),
+        );
     }
     if let Some(out) = flag_value("--render-settings") {
         return render_settings_cmd(&out);
+    }
+    if let Some(out) = flag_value("--render-splash") {
+        let at = flag_value("--at")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(300);
+        return render_splash_cmd(&out, at);
     }
 
     // 诊断日志：GUI 模式下把采集链路写进文件，用于现场排障（默认完全关闭）。
@@ -145,10 +157,11 @@ fn main() -> ExitCode {
         return fatal("无法获取程序实例句柄，程序无法启动。", 2);
     }
 
-    // ③ 注册三个窗口类：控制器（隐藏）、历史弹窗、设置窗口。
+    // ③ 注册四个窗口类：控制器（隐藏）、历史弹窗、设置窗口、启动动画。
     if !cliphist::app::register_class(hinstance)
         || !cliphist::ui::popup::register_class(hinstance)
         || !cliphist::ui::settings_window::register_class(hinstance)
+        || !cliphist::ui::splash::register_class(hinstance)
     {
         return fatal("窗口类注册失败，程序无法启动。", 3);
     }
@@ -190,6 +203,30 @@ fn print_help() {
     println!("  --version     打印版本");
     println!();
     println!("数据文件：data.db（程序同目录；该目录不可写时回退到 %LOCALAPPDATA%\\ClipHist）");
+}
+
+/// 开发者预览：把启动动画某一帧渲染成 PNG（不显示窗口）。
+///
+/// `--at <ms>` 指定动画时刻，默认 300ms（淡入完成、进度条走了一半）。
+fn render_splash_cmd(out_path: &str, at_ms: i64) -> ExitCode {
+    use cliphist::image::thumb::encode_png_rgba;
+    use cliphist::ui::splash;
+
+    let Some((w, h, rgba)) = splash::render_preview(at_ms) else {
+        eprintln!("渲染失败");
+        return ExitCode::from(5);
+    };
+    let png = encode_png_rgba(w as u32, h as u32, &rgba).unwrap_or_default();
+    match std::fs::write(out_path, &png) {
+        Ok(()) => {
+            println!("已渲染启动动画（{at_ms} ms）：{out_path}（{w}×{h}）");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("写入 {out_path} 失败：{e}");
+            ExitCode::from(6)
+        }
+    }
 }
 
 /// 开发者预览：把设置窗口渲染成 PNG（不显示窗口、不写注册表、不落库）。
@@ -236,7 +273,7 @@ fn render_settings_cmd(out_path: &str) -> ExitCode {
 /// 开发者预览：把历史弹窗渲染成 PNG（不显示窗口、不碰剪贴板、不碰数据库）。
 ///
 /// 用法：`ClipHist.exe --render-preview out.png [--preview-empty] [--preview-query 关键字]`
-fn render_preview_cmd(out_path: &str, empty: bool, query: Option<String>) -> ExitCode {
+fn render_preview_cmd(out_path: &str, empty: bool, query: Option<String>, main: bool) -> ExitCode {
     use cliphist::core::model::{ItemRow, Kind};
     use cliphist::core::store::now_ms;
     use cliphist::image::thumb::encode_png_rgba;
@@ -249,7 +286,12 @@ fn render_preview_cmd(out_path: &str, empty: bool, query: Option<String>) -> Exi
         eprintln!("窗口类注册失败");
         return ExitCode::from(3);
     }
-    let Some(hwnd) = popup::create(std::ptr::null_mut(), hinstance) else {
+    let mode = if main {
+        popup::Mode::Main
+    } else {
+        popup::Mode::Popup
+    };
+    let Some(hwnd) = popup::create(std::ptr::null_mut(), hinstance, mode) else {
         eprintln!("创建弹窗失败");
         return ExitCode::from(4);
     };
@@ -375,10 +417,18 @@ fn render_preview_cmd(out_path: &str, empty: bool, query: Option<String>) -> Exi
 
     let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
     let dpi = if dpi == 0 { 96 } else { dpi };
-    let m = Metrics::new(dpi);
+    let m = if main {
+        Metrics::main_window(dpi)
+    } else {
+        Metrics::new(dpi)
+    };
     let w = m.width;
     let rows = if empty { Vec::new() } else { rows };
-    let h = m.height_for(rows.len());
+    let h = if main {
+        m.max_height
+    } else {
+        m.height_for(rows.len())
+    };
     let query = query.unwrap_or_default();
     let Some(rgba) =
         popup::render_preview(hwnd, rows.clone(), None, &query, &[(4, thumb_png)], w, h)

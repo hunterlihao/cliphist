@@ -39,7 +39,7 @@ pub mod color {
 
     /// 纸面
     pub const PAPER: COLORREF = c(255, 255, 255);
-    /// 主文字 / 反相底 / 结构线里最深的一级
+    /// 主文字 / 结构线里最深的一级
     pub const INK: COLORREF = c(11, 11, 12);
     /// 次级文字（来源进程、元信息）
     pub const INK2: COLORREF = c(85, 85, 92);
@@ -49,12 +49,13 @@ pub mod color {
     pub const RULE: COLORREF = c(230, 230, 234);
     /// 交互对象描边（输入框下划线、文件夹轮廓）
     pub const RULE_STRONG: COLORREF = c(201, 201, 208);
-    /// 悬停底（比纯白深一点点，只有 4% 的差）
-    pub const HOVER: COLORREF = c(244, 244, 246);
-    /// 反相选中
-    pub const SEL_BG: COLORREF = c(11, 11, 12);
-    pub const SEL_FG: COLORREF = c(255, 255, 255);
-    pub const SEL_FG2: COLORREF = c(166, 166, 174);
+    /// 悬停底：比纸面深 2%，轻到几乎看不见，只用来确认"鼠标在这行"
+    pub const HOVER: COLORREF = c(250, 250, 251);
+    /// 选中行左边缘的墨条（3px），像编辑器里的当前行标记。
+    ///
+    /// 选中**不改底色、也不反相**：整行仍然是纸白，焦点只靠这一道结构性的墨条表达。
+    /// 黑块在长列表里太重，会把两行文字压成一片；浅灰底又等于"另一种底色"。
+    pub const SEL_EDGE: COLORREF = c(11, 11, 12);
     /// 警示（"未记录"、热键冲突、清空确认）
     pub const WARN: COLORREF = c(176, 62, 44);
 }
@@ -76,6 +77,8 @@ pub struct Metrics {
     /// 弹窗最大高度（含搜索行与页脚）
     pub max_height: i32,
     pub min_height: i32,
+    /// 主窗口顶部标题栏高度（弹窗为 0：弹窗没有标题栏）
+    pub title_h: i32,
     /// 顶部搜索行高度（含下划线）
     pub header_h: i32,
     pub row_h: i32,
@@ -98,6 +101,7 @@ impl Metrics {
             width: s(460, dpi),
             max_height: s(600, dpi),
             min_height: s(160, dpi),
+            title_h: 0,
             header_h: s(42, dpi),
             row_h: s(56, dpi),
             mark: s(34, dpi),
@@ -112,6 +116,24 @@ impl Metrics {
         }
     }
 
+    /// 主窗口（居中大窗）：同一套排版，宽度更大、高度固定，顶部多一条标题栏。
+    ///
+    /// 不复用弹窗的自适应高度：主窗口是个"可以待着"的窗口，
+    /// 高度随着记录条数跳动会显得很廉价。
+    pub fn main_window(dpi: u32) -> Self {
+        let mut m = Self::new(dpi);
+        m.width = s(760, dpi);
+        m.max_height = s(620, dpi);
+        m.min_height = s(620, dpi);
+        m.title_h = s(38, dpi);
+        m
+    }
+
+    /// 列表区顶部 = 标题栏 + 搜索行。
+    pub fn list_top(&self) -> i32 {
+        self.title_h + self.header_h
+    }
+
     /// 文字区左边界：外边距 + 标记方框 + 间隙。文本行虽然不画标记，
     /// 但也从同一条线开始 —— 空出来的那一段就是"边距"，而不是省的空白。
     pub fn text_left(&self) -> i32 {
@@ -123,9 +145,9 @@ impl Metrics {
         self.width - self.pad
     }
 
-    /// 列表可视区高度（扣掉搜索行与页脚）。
+    /// 列表可视区高度（扣掉标题栏、搜索行与页脚）。
     pub fn list_height(&self) -> i32 {
-        (self.max_height - self.header_h - self.footer_h).max(self.row_h)
+        (self.max_height - self.list_top() - self.footer_h).max(self.row_h)
     }
 
     /// 一屏能放几行（至少 1）。
@@ -135,7 +157,7 @@ impl Metrics {
 
     /// 按条目数自适应窗口高度：1 条记录时不摆一大片空白。
     pub fn height_for(&self, rows: usize) -> i32 {
-        let want = self.header_h + self.footer_h + (rows as i32).max(1) * self.row_h;
+        let want = self.list_top() + self.footer_h + (rows as i32).max(1) * self.row_h;
         want.clamp(self.min_height, self.max_height)
     }
 }
@@ -148,7 +170,15 @@ mod tests {
     fn colorref_is_bgr() {
         assert_eq!(color::PAPER, 0x00FF_FFFF);
         assert_eq!(c(255, 0, 0), 0x0000_00FF);
-        assert_eq!(color::SEL_BG, color::INK);
+    }
+
+    #[test]
+    fn selection_edge_is_ink_and_keeps_paper_background() {
+        // 选中态：底色仍是纸白（只有悬停有极浅的底），焦点由左边缘墨条表达。
+        assert_eq!(color::SEL_EDGE, color::INK);
+        let lum = |c: u32| (c & 0xFF) + ((c >> 8) & 0xFF) + ((c >> 16) & 0xFF);
+        assert!(lum(color::PAPER) > lum(color::HOVER), "悬停必须比纸面略深");
+        assert_eq!(lum(color::PAPER), 765, "纸面必须是纯白");
     }
 
     #[test]

@@ -66,6 +66,7 @@ const CMD_CLEAR: u32 = 102;
 const CMD_SETTINGS: u32 = 103;
 const CMD_AUTOSTART: u32 = 104;
 const CMD_EXIT: u32 = 105;
+const CMD_POPUP: u32 = 106;
 // 条目右键菜单命令
 const CMD_ITEM_PIN: u32 = 200;
 const CMD_ITEM_DELETE: u32 = 201;
@@ -334,6 +335,8 @@ pub fn finalize_hash(item: &mut CapturedItem) {
 struct App {
     hwnd: HWND,
     popup: HWND,
+    /// 居中的主窗口（与浮动弹窗共用窗口类，只是模式不同）。
+    main_hwnd: HWND,
     settings_hwnd: HWND,
     tray: Option<Tray>,
     settings: Settings,
@@ -390,7 +393,7 @@ pub(crate) fn diag_msg(args: std::fmt::Arguments<'_>) {
 }
 
 impl App {
-    fn new(hwnd: HWND, popup: HWND, settings_hwnd: HWND) -> Option<App> {
+    fn new(hwnd: HWND, popup: HWND, main_hwnd: HWND, settings_hwnd: HWND) -> Option<App> {
         let data = paths::resolve_data_location();
         let data_note = data.note.clone();
         let (read, recovered) = match Store::open_or_recover(&data.path) {
@@ -407,6 +410,7 @@ impl App {
         let mut app = App {
             hwnd,
             popup,
+            main_hwnd,
             settings_hwnd,
             tray: None,
             settings,
@@ -498,12 +502,53 @@ impl App {
         }
         // 记录粘贴目标：必须是"别的窗口"，不能是我们自己。
         let fg = clipboard::foreground_window();
-        if fg != self.popup && fg != self.hwnd && fg != self.settings_hwnd && !fg.is_null() {
+        if fg != self.popup
+            && fg != self.main_hwnd
+            && fg != self.hwnd
+            && fg != self.settings_hwnd
+            && !fg.is_null()
+        {
             self.target = fg;
         }
         let rows = self.query_rows();
         let status = self.popup_status();
         popup::show(self.popup, rows, status);
+    }
+
+    /// 打开/收起设置窗口。托盘菜单和主窗口标题栏的"设置"都走这里。
+    fn open_settings(&mut self) {
+        settings_window::toggle(
+            self.settings_hwnd,
+            self.settings.clone(),
+            &self.data.path.display().to_string(),
+        );
+    }
+
+    /// 显示/隐藏居中的主窗口。托盘单击走这里。
+    fn toggle_main(&mut self) {
+        if popup::is_visible(self.main_hwnd) {
+            popup::hide(self.main_hwnd);
+            return;
+        }
+        // 主窗口打开时也别忘了记录粘贴目标（与浮动列表同一套规则）。
+        let fg = clipboard::foreground_window();
+        if fg != self.popup
+            && fg != self.main_hwnd
+            && fg != self.hwnd
+            && fg != self.settings_hwnd
+            && !fg.is_null()
+        {
+            self.target = fg;
+        }
+        let rows = self.query_rows();
+        let status = self.popup_status();
+        popup::show(self.main_hwnd, rows, status);
+    }
+
+    fn show_main(&mut self) {
+        if !popup::is_visible(self.main_hwnd) {
+            self.toggle_main();
+        }
     }
 
     fn show_popup(&mut self) {
@@ -684,7 +729,8 @@ impl App {
 
     fn tray_menu(&mut self) {
         let items = vec![
-            MenuItem::new(CMD_SHOW, "显示历史"),
+            MenuItem::new(CMD_SHOW, "打开主窗口（居中）"),
+            MenuItem::new(CMD_POPUP, "浮动列表（光标处）"),
             MenuItem::new(
                 CMD_PAUSE,
                 if self.settings.pause_capture {
@@ -710,7 +756,8 @@ impl App {
 
     fn handle_command(&mut self, cmd: u32) {
         match cmd {
-            CMD_SHOW => self.show_popup(),
+            CMD_SHOW => self.show_main(),
+            CMD_POPUP => self.show_popup(),
             CMD_PAUSE => {
                 self.settings.pause_capture = !self.settings.pause_capture;
                 self.apply_settings(self.settings.clone());
@@ -723,13 +770,7 @@ impl App {
                     popup::set_rows(self.popup, rows);
                 }
             }
-            CMD_SETTINGS => {
-                settings_window::toggle(
-                    self.settings_hwnd,
-                    self.settings.clone(),
-                    &self.data.path.display().to_string(),
-                );
-            }
+            CMD_SETTINGS => self.open_settings(),
             CMD_AUTOSTART => {
                 self.settings.autostart = !self.settings.autostart;
                 self.apply_settings(self.settings.clone());
@@ -875,6 +916,15 @@ pub fn init_runtime(hwnd: HWND, autostart: bool) {
         let mut guard = cell.borrow_mut();
         let Some(app) = guard.as_mut() else { return };
 
+        // 开场动画：放在最前面，让它盖住后面这些初始化（托盘/监听/热键）。
+        // 开机自启时一律不显示 —— 那时候用户没在等，弹一张卡片只会打扰。
+        if app.settings.show_splash && !autostart {
+            let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
+            if !hinstance.is_null() {
+                crate::ui::splash::show(hinstance);
+            }
+        }
+
         // 托盘
         let tip = app.tray_tooltip();
         app.tray = Tray::add(hwnd, TRAY_ID, &tip);
@@ -971,7 +1021,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
     match msg {
         WM_CREATE => {
             let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
-            let popup = popup::create(hwnd, hinstance);
+            let popup = popup::create(hwnd, hinstance, popup::Mode::Popup);
+            let main_hwnd = popup::create(hwnd, hinstance, popup::Mode::Main);
             let settings_hwnd = settings_window::create(hwnd, hinstance);
             let Some(popup) = popup else {
                 show_error("创建界面窗口失败，程序将退出。");
@@ -979,7 +1030,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 return 0;
             };
             let settings_hwnd = settings_hwnd.unwrap_or(std::ptr::null_mut());
-            let app = App::new(hwnd, popup, settings_hwnd);
+            let main_hwnd = main_hwnd.unwrap_or(std::ptr::null_mut());
+            let app = App::new(hwnd, popup, main_hwnd, settings_hwnd);
             APP.with(|c| {
                 *c.borrow_mut() = app;
             });
@@ -1018,10 +1070,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             const WM_CONTEXTMENU: u32 = 0x007B;
             const NIN_SELECT: u32 = 0x0400;
             match event {
+                // 托盘左键：打开**居中的主窗口**（要"待在屏幕上"的那种）。
+                // 随手呼出的浮动列表留给全局热键 —— 那个要的是快、跟着光标。
                 WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_SELECT => APP.with(|c| {
                     if let Ok(mut g) = c.try_borrow_mut() {
                         if let Some(app) = g.as_mut() {
-                            app.toggle_popup();
+                            app.toggle_main();
                         }
                     }
                 }),
@@ -1034,6 +1088,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 }),
                 _ => {}
             }
+            return 0;
+        }
+        popup::WM_LIST_OPEN_SETTINGS => {
+            APP.with(|c| {
+                if let Ok(mut g) = c.try_borrow_mut() {
+                    if let Some(app) = g.as_mut() {
+                        app.open_settings();
+                    }
+                }
+            });
             return 0;
         }
         popup::WM_POPUP_CHOOSE => {

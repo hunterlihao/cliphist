@@ -56,6 +56,8 @@ pub struct Settings {
     pub paste_mode: PasteMode,
     pub autostart: bool,
     pub capture_images: bool,
+    /// 启动时显示开场动画（开机自启时一律不显示，不打扰）。
+    pub show_splash: bool,
 }
 
 impl Default for Settings {
@@ -73,6 +75,7 @@ impl Default for Settings {
             paste_mode: PasteMode::AutoPaste,
             autostart: false,
             capture_images: true,
+            show_splash: true,
         }
     }
 }
@@ -111,6 +114,7 @@ impl Settings {
             ("capture.images", bool_str(self.capture_images)),
             ("paste.mode", (self.paste_mode as i64).to_string()),
             ("startup.autostart", bool_str(self.autostart)),
+            ("startup.splash", bool_str(self.show_splash)),
         ]
     }
 
@@ -158,6 +162,9 @@ impl Settings {
         }
         if let Some(v) = get("startup.autostart").and_then(parse_bool) {
             s.autostart = v;
+        }
+        if let Some(v) = get("startup.splash").and_then(parse_bool) {
+            s.show_splash = v;
         }
         s.sanitize();
         s
@@ -215,7 +222,7 @@ pub fn vk_text(vk: u32) -> String {
         0x41..=0x5A => ((vk as u8) as char).to_string(), // A-Z
         0x70..=0x7B => format!("F{}", vk - 0x6F),        // F1-F12
         0x60..=0x69 => format!("小键盘{}", vk - 0x60),   // Num0-9
-        0x20 => "Space".to_string(),
+        0x20 => "空格".to_string(),
         0x0D => "Enter".to_string(),
         0x09 => "Tab".to_string(),
         0x1B => "Esc".to_string(),

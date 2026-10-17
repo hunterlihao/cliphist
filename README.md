@@ -17,6 +17,17 @@ Windows 便携版剪贴板历史工具：记录**文本 / 文件 / 图片**，�
 设计取舍的完整说明见 [docs/design.md](docs/design.md)，设置窗口见
 [settings.png](docs/images/settings.png)。
 
+打开方式有两条路径，对应两种心情：
+
+- **热键**（默认 `Alt+V`）→ 浮动列表跟着光标弹出，单击即粘贴。要的是快：眼睛不用离开光标。
+- **托盘单击** → **主窗口在屏幕绝对居中**打开，760×620，可以慢慢翻；单击选中、双击/回车才粘贴。
+  右上角是"设置"和"✕"，标题栏可拖动。
+
+启动时有一小段开场动画（一张纸卡片落定 + 一条墨线扫过，820ms，不抢焦点、不阻塞启动、
+开机自启时自动跳过），设置里可以关。
+
+![主窗口](docs/images/main.png)
+
 启动后是纯 GUI 子系统进程：**不会出现任何控制台窗口**（`--selftest` 等命令行模式除外）。
 
 ## 实测数据（本机 release 构建，`scripts\measure-memory.ps1`）
@@ -118,6 +129,8 @@ pwsh -File scripts\measure-memory.ps1       # 内存实测（三段采样 + 判�
 .\dist-portable\ClipHist.exe --render-preview out.png
 .\dist-portable\ClipHist.exe --render-preview empty.png --preview-empty
 .\dist-portable\ClipHist.exe --render-settings settings.png
+.\dist-portable\ClipHist.exe --render-preview main.png --preview-main
+.\dist-portable\ClipHist.exe --render-splash splash.png --at 380
 
 # 排障：把"通知 → 取数 → 过滤 → 落库"五段链路写进日志
 .\dist-portable\ClipHist.exe --log clip.log

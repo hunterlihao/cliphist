@@ -8,6 +8,7 @@ pub mod hotkey;
 pub mod paths;
 pub mod process;
 pub mod registry;
+pub mod screen;
 pub mod single_instance;
 pub mod strings;
 pub mod tray;

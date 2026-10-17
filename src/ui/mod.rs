@@ -3,5 +3,6 @@
 pub mod gdi;
 pub mod popup;
 pub mod settings_window;
+pub mod splash;
 pub mod theme;
 pub mod timefmt;

@@ -9,12 +9,12 @@ use std::mem::zeroed;
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, HDC, PAINTSTRUCT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetWindowLongPtrW,
-    LoadCursorW, PostMessageW, RegisterClassExW, SetForegroundWindow, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, IDC_ARROW,
-    SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_APP, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_CLIPCHILDREN,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW, LoadCursorW,
+    PostMessageW, RegisterClassExW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, IDC_ARROW, SWP_SHOWWINDOW,
+    SW_HIDE, SW_SHOW, WM_APP, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_SYSCHAR, WM_SYSKEYDOWN, WNDCLASSEXW,
+    WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::core::settings::{PasteMode, Settings, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
@@ -43,13 +43,14 @@ pub enum RowKind {
     MaxImageMb,
     PasteMode,
     Autostart,
+    Splash,
     Pause,
     CaptureImages,
     DataPath,
     Clear,
 }
 
-pub const ROWS: [RowKind; 11] = [
+pub const ROWS: [RowKind; 12] = [
     RowKind::Hotkey,
     RowKind::MaxItems,
     RowKind::KeepDays,
@@ -57,6 +58,7 @@ pub const ROWS: [RowKind; 11] = [
     RowKind::MaxImageMb,
     RowKind::PasteMode,
     RowKind::Autostart,
+    RowKind::Splash,
     RowKind::Pause,
     RowKind::CaptureImages,
     RowKind::DataPath,
@@ -176,6 +178,7 @@ impl SettingsState {
             RowKind::MaxImageMb => "图片总量",
             RowKind::PasteMode => "选中后",
             RowKind::Autostart => "开机自启",
+            RowKind::Splash => "启动动画",
             RowKind::Pause => "暂停记录",
             RowKind::CaptureImages => "记录图片",
             RowKind::DataPath => "数据文件",
@@ -216,6 +219,7 @@ impl SettingsState {
                 PasteMode::ClipboardOnly => "仅放回剪贴板".to_string(),
             },
             RowKind::Autostart => on_off(s.autostart),
+            RowKind::Splash => on_off(s.show_splash),
             RowKind::Pause => on_off(s.pause_capture),
             RowKind::CaptureImages => on_off(s.capture_images),
             RowKind::DataPath => self.data_path.clone(),
@@ -299,6 +303,10 @@ impl SettingsState {
                 self.values.autostart = !self.values.autostart;
                 ClickResult::Changed
             }
+            RowKind::Splash => {
+                self.values.show_splash = !self.values.show_splash;
+                ClickResult::Changed
+            }
             RowKind::Pause => {
                 self.values.pause_capture = !self.values.pause_capture;
                 ClickResult::Changed
@@ -312,31 +320,51 @@ impl SettingsState {
         }
     }
 
-    /// 捕获热键。返回 true 表示这次按键被吃掉。
-    fn capture_hotkey(&mut self, vk: u32) -> bool {
+    /// 捕获热键。返回 `(是否吃掉这次按键, 是否真的改了值)`。
+    fn capture_hotkey(&mut self, vk: u32) -> (bool, bool) {
         if !self.capturing {
-            return false;
+            return (false, false);
         }
         if vk == 0x1B {
             // ESC 取消
             self.capturing = false;
-            return true;
+            self.status = None;
+            return (true, false);
         }
         // 单独的修饰键不算，继续等真正的按键
         if matches!(vk, 0x10 | 0x11 | 0x12 | 0x5B | 0x5C) {
-            return true;
+            return (true, false);
         }
         let mods = current_mods();
         if mods == 0 {
             // 没有修饰键的组合会抢走普通打字，拒绝并给出反馈
             self.status = Some("必须包含 Ctrl / Alt / Shift / Win".to_string());
-            return true;
+            return (true, false);
         }
+
+        let prev = (self.values.hotkey_mods, self.values.hotkey_vk);
+        let text = crate::core::settings::format_hotkey(mods, vk);
+        self.capturing = false;
+
+        if prev == (mods, vk) {
+            self.status = Some(format!("仍为 {text}"));
+            return (true, false);
+        }
+
+        // 当场试注册一次：否则注册失败只会在控制器那边静默回退，
+        // 用户看到的就是"改了没用"（Alt+空格 那次就是这么被报上来的）。
+        let ok =
+            crate::win::hotkey::register(self.hwnd, crate::win::hotkey::HOTKEY_PROBE, mods, vk);
+        if !ok {
+            // 注册不上就别改：保持原值，并把原因摆在页脚上，而不是假装成功。
+            self.status = Some(format!("{text} 不可用（被系统或其他程序占用），换一个"));
+            return (true, false);
+        }
+        crate::win::hotkey::unregister(self.hwnd, crate::win::hotkey::HOTKEY_PROBE);
         self.values.hotkey_mods = mods;
         self.values.hotkey_vk = vk;
-        self.capturing = false;
-        self.status = None;
-        true
+        self.status = Some(format!("已设为 {text}"));
+        (true, true)
     }
 
     fn paint(&mut self, target: HDC) {
@@ -610,18 +638,23 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             }
             return 0;
         }
-        WM_KEYDOWN => {
+        // Alt 组合键走 WM_SYSKEYDOWN（不是 WM_KEYDOWN）—— 这正是"Alt+空格 抓不到"
+        // 的原因：之前只处理了 WM_KEYDOWN，所有带 Alt 的组合都被漏掉了。
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
             let vk = wp as u32;
-            let mut changed = false;
             let mut hide = false;
             let mut owner = std::ptr::null_mut();
             if let Some(st) = state(hwnd) {
                 owner = st.owner;
                 if st.capturing {
-                    changed = st.capture_hotkey(vk);
-                    changed = changed && !st.capturing; // 真正改了热键才算变更
+                    let (_eaten, changed) = st.capture_hotkey(vk);
                     InvalidateRect(hwnd, std::ptr::null(), 0);
-                } else if vk == 0x1B {
+                    if changed && !owner.is_null() {
+                        PostMessageW(owner, WM_SETTINGS_CHANGED, 0, 0);
+                    }
+                    return 0;
+                }
+                if vk == 0x1B {
                     hide = true;
                 }
             }
@@ -630,11 +663,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 if !owner.is_null() {
                     PostMessageW(owner, WM_SETTINGS_CLOSED, 0, 0);
                 }
-            } else if changed && !owner.is_null() {
-                PostMessageW(owner, WM_SETTINGS_CHANGED, 0, 0);
             }
             return 0;
         }
+        // 捕获热键时把 Alt 组合产生的 WM_SYSCHAR 也吃掉，否则系统会"叮"一声。
+        WM_SYSCHAR if capturing_now(hwnd) => return 0,
         WM_CLOSE => {
             ShowWindow(hwnd, SW_HIDE);
             let owner = state(hwnd)
@@ -650,7 +683,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
     DefWindowProcW(hwnd, msg, wp, lp)
 }
 
-/// 显示设置窗口并注入当前值。
+/// 当前是否在等待用户按键（捕获态）。决定要不要吃掉系统字符消息。
+fn capturing_now(hwnd: HWND) -> bool {
+    unsafe { state(hwnd) }
+        .map(|st| st.capturing)
+        .unwrap_or(false)
+}
+
+/// 显示设置窗口并注入当前值。窗口在屏幕上**绝对居中**（主显示器工作区）。
 pub fn show(hwnd: HWND, values: Settings, data_path: &str) {
     if let Some(st) = unsafe { state(hwnd) } {
         st.values = values;
@@ -660,14 +700,14 @@ pub fn show(hwnd: HWND, values: Settings, data_path: &str) {
         st.status = None;
         st.hover = None;
         let l = st.layout;
-        let mut pt = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
-        unsafe { GetCursorPos(&mut pt) };
+        // 居中而不是"跟着鼠标出现在右下角"：这是设置面板，不是上下文菜单。
+        let (x, y) = crate::win::screen::center_on_primary(l.width, l.height());
         unsafe {
             SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
-                (pt.x - l.width / 2).max(0),
-                (pt.y - l.height() / 3).max(0),
+                x,
+                y,
                 l.width,
                 l.height(),
                 SWP_SHOWWINDOW,
@@ -865,11 +905,11 @@ mod tests {
         let hk_idx = ROWS.iter().position(|r| *r == RowKind::Hotkey).unwrap();
         assert_eq!(st.click_row(hk_idx, 300), ClickResult::Redraw);
         assert!(st.capturing);
-        // 单独的 Ctrl 不算
-        assert!(st.capture_hotkey(0x11));
+        // 单独的 Ctrl 不算：吃掉按键，但不改值、也不退出捕获
+        assert_eq!(st.capture_hotkey(0x11), (true, false));
         assert!(st.capturing);
-        // ESC 取消
-        assert!(st.capture_hotkey(0x1B));
+        // ESC 取消：吃掉按键、退出捕获、值不变
+        assert_eq!(st.capture_hotkey(0x1B), (true, false));
         assert!(!st.capturing);
     }
 
