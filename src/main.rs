@@ -147,8 +147,28 @@ fn main() -> ExitCode {
 
     // ② 单实例：已有实例就唤醒它然后退出。guard 必须活到 main 结束。
     let Some(_guard) = cliphist::win::single_instance::acquire() else {
-        cliphist::win::single_instance::wake_existing(cliphist::app::CLASS_NAME);
-        return ExitCode::SUCCESS;
+        // 已经有一个实例在跑：去敲门让它把主窗口显示出来。
+        //
+        // 这里必须**重试**：对方可能正在初始化（还没有窗口可找），过去只试一次就直接退出，
+        // 表现就是"双击了一下，程序自己消失了" —— 用户完全不知道发生了什么。
+        let mut woken = false;
+        for _ in 0..25 {
+            if cliphist::win::single_instance::wake_existing(cliphist::app::CLASS_NAME) {
+                woken = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        if woken {
+            return ExitCode::SUCCESS;
+        }
+        // 唤不醒：说明有个卡住的旧实例占着单实例锁。告诉用户，别装作没事。
+        return fatal(
+            "剪贴板历史已经在运行，但没有响应。\n\n\
+             请到任务管理器结束 ClipHist.exe 后重新启动；\n\
+             如果托盘里已经有图标，双击它即可打开主窗口。",
+            7,
+        );
     };
 
     let hinstance =

@@ -342,8 +342,10 @@ pub fn show(hinstance: HINSTANCE) -> Option<HWND> {
     if hwnd.is_null() {
         // 创建失败：把所有权收回来，别泄漏。
         drop(unsafe { Box::from_raw(ptr) });
+        crate::app::diag_msg(format_args!("splash: 创建失败"));
         return None;
     }
+    crate::app::diag_msg(format_args!("splash: 已显示 {:?} {w}x{h}", hwnd));
     unsafe {
         SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);

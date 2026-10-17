@@ -1018,13 +1018,20 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             .unwrap_or(0)
     });
     if wake_msg != 0 && msg == wake_msg {
-        APP.with(|c| {
-            if let Ok(mut g) = c.try_borrow_mut() {
+        // 第二个实例来敲门：把居中的主窗口叫出来（用户能立刻看到反馈），
+        // 而不是什么都不发生 —— 否则"双击没反应"和"程序崩了"看起来一样。
+        let busy = APP.with(|c| match c.try_borrow_mut() {
+            Ok(mut g) => {
                 if let Some(app) = g.as_mut() {
-                    app.show_popup();
+                    app.show_main();
                 }
+                false
             }
+            Err(_) => true,
         });
+        if busy {
+            unsafe { PostMessageW(hwnd, msg, wp, lp) };
+        }
         return 0;
     }
 

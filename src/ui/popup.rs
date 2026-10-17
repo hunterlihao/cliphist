@@ -429,7 +429,7 @@ impl PopupState {
         let m = &self.metrics;
         let line = m.fs_preview + m.gap;
         let top = m.title_h + (m.header_h - line) / 2;
-        let left = m.pad + m.mark;
+        let left = m.pad + m.mark + 4;
         unsafe {
             MoveWindow(
                 self.edit,
@@ -616,12 +616,14 @@ impl PopupState {
     /// 这里要的是"在纸上写一行字"，所以只有文字和它下面的那条地面线。
     fn render_header(&self, dc: HDC, w: i32) {
         let m = self.metrics;
-        let label_rc = rect(m.pad, m.title_h + 1, m.pad + m.mark, m.list_top() - 2);
-        gdi::text(dc, self.fonts.badge, color::INK3, &label_rc, "搜索", false);
+        // 标签和输入**必须同字号同基线**：11px 等宽的"搜索"挨着 15px 的输入文字，
+        // 一眼就是"两个东西拼在一起"。现在统一 15px 界面字体，只靠颜色退到三级灰。
+        let label_rc = rect(m.pad, m.title_h, m.pad + m.mark + 4, m.list_top() - 2);
+        gdi::text(dc, self.fonts.ui, color::INK3, &label_rc, "搜索", true);
         // 预览模式：子窗口（EDIT）不参与离屏渲染，这里代画输入框内容 ——
         // 空字符串就画一根光标，让预览图能表达"这里可以打字"。
         if let Some(text) = &self.preview_text {
-            let input_left = m.pad + m.mark;
+            let input_left = m.pad + m.mark + 4;
             if text.is_empty() {
                 let caret_h = (m.fs_preview + 4).min(m.header_h - 10);
                 let y = m.title_h + (m.header_h - caret_h) / 2;
