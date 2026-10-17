@@ -822,7 +822,10 @@ impl App {
             );
             return;
         }
-        // 给目标窗口一点时间处理激活，再送 Ctrl+V；否则按键可能落空。
+        // 先等物理修饰键松开：热键触发时 Ctrl/Alt 仍被按住，
+        // 此时注入的 Ctrl+V 会变成 Ctrl+Alt+V，目标程序不会粘贴。
+        clipboard::wait_modifiers_released();
+        // 再给目标窗口一点时间处理激活，否则按键可能落空。
         thread::sleep(Duration::from_millis(PASTE_DELAY_MS));
         if !clipboard::send_ctrl_v() {
             self.balloon("已复制到剪贴板", "模拟粘贴失败，请手动按 Ctrl+V。", true);

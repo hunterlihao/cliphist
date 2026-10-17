@@ -19,6 +19,23 @@ use windows_sys::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
 };
 use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+/// 等物理修饰键**全部松开**（最多 400ms）。
+///
+/// 热键回调发生在按键按下的那一刻，此时 Ctrl / Alt / Shift 仍然被按住；
+/// 如果这时注入 Ctrl+V，目标程序看到的是 `Ctrl+Alt+V` —— 不是粘贴命令。
+/// 这正是"第一次按 Ctrl+Alt+V 只进剪贴板、还得手动再按一次 Ctrl+V"的根因。
+pub fn wait_modifiers_released() {
+    for _ in 0..40 {
+        let down = |vk: i32| unsafe {
+            windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk)
+        } < 0;
+        if !down(0x11) && !down(0x12) && !down(0x10) && !down(0x5B) && !down(0x5C) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL, MOD_SHIFT,
     MOD_WIN, VK_CONTROL, VK_V,
