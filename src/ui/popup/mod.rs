@@ -660,7 +660,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             // 主窗口可缩放：把新的客户区尺寸写回度量，排版随之重算。
             if let Some(st) = state(hwnd) {
                 if st.mode == Mode::Main {
-                    let (w, h) = (loword(lp) as i32, hiword(lp) as i32);
+                    let (w, h) = (loword(lp), hiword(lp));
                     if w > 0 && h > 0 {
                         st.metrics.width = w;
                         st.metrics.max_height = h;
@@ -732,10 +732,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             if let Some((bits, _, _, w0, h0)) = scaling {
                 let mut pt = POINT { x: 0, y: 0 };
                 unsafe { GetCursorPos(&mut pt) };
-                let anchor = state(hwnd).and_then(|_st| {
+                let anchor = state(hwnd).map(|_st| {
                     let mut rc = rect(0, 0, 0, 0);
                     unsafe { GetWindowRect(hwnd, &mut rc) };
-                    Some((rc.left, rc.top))
+                    (rc.left, rc.top)
                 });
                 if let Some((left0, top0)) = anchor {
                     let mut x = left0;

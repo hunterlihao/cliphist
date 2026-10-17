@@ -674,6 +674,54 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// 列清单（多处以同一顺序读取，集中一处免得漂移）。
+const COLS: &str = "id, kind, preview, created_at, last_used_at, use_count, pinned,
+                    source_exe, file_count, img_w, img_h, thumb_state";
+
+fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
+    Ok(ItemRow {
+        id: r.get(0)?,
+        kind: Kind::from_i64(r.get(1)?).unwrap_or(Kind::Text),
+        preview: r.get(2)?,
+        created_at: r.get(3)?,
+        last_used_at: r.get(4)?,
+        use_count: r.get(5)?,
+        pinned: r.get::<_, i64>(6)? != 0,
+        source_exe: r.get(7)?,
+        file_count: r.get(8)?,
+        img_w: r.get(9)?,
+        img_h: r.get(10)?,
+        thumb_state: r.get(11)?,
+    })
+}
+
+/// 相关度排序：置顶 → 首词出现位置 → 最近使用。
+///
+/// 只按时间排会出现"明明以关键字开头的那条排在后面"，搜索体验会很怪。
+fn rank_rows(rows: &mut [ItemRow], tokens: &[String]) {
+    let first = tokens.first().cloned().unwrap_or_default();
+    rows.sort_by(|a, b| {
+        use std::cmp::Ordering;
+        let ka = (
+            a.pinned,
+            a.preview.to_lowercase().find(&first).unwrap_or(usize::MAX),
+            a.last_used_at,
+        );
+        let kb = (
+            b.pinned,
+            b.preview.to_lowercase().find(&first).unwrap_or(usize::MAX),
+            b.last_used_at,
+        );
+        match kb.0.cmp(&ka.0) {
+            Ordering::Equal => match ka.1.cmp(&kb.1) {
+                Ordering::Equal => kb.2.cmp(&ka.2),
+                other => other,
+            },
+            other => other,
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1078,52 +1126,4 @@ mod tests {
         };
         assert!(corrupt.to_string().contains("已损坏"));
     }
-}
-
-/// 列清单（多处以同一顺序读取，集中一处免得漂移）。
-const COLS: &str = "id, kind, preview, created_at, last_used_at, use_count, pinned,
-                    source_exe, file_count, img_w, img_h, thumb_state";
-
-fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
-    Ok(ItemRow {
-        id: r.get(0)?,
-        kind: Kind::from_i64(r.get(1)?).unwrap_or(Kind::Text),
-        preview: r.get(2)?,
-        created_at: r.get(3)?,
-        last_used_at: r.get(4)?,
-        use_count: r.get(5)?,
-        pinned: r.get::<_, i64>(6)? != 0,
-        source_exe: r.get(7)?,
-        file_count: r.get(8)?,
-        img_w: r.get(9)?,
-        img_h: r.get(10)?,
-        thumb_state: r.get(11)?,
-    })
-}
-
-/// 相关度排序：置顶 → 首词出现位置 → 最近使用。
-///
-/// 只按时间排会出现"明明以关键字开头的那条排在后面"，搜索体验会很怪。
-fn rank_rows(rows: &mut [ItemRow], tokens: &[String]) {
-    let first = tokens.first().cloned().unwrap_or_default();
-    rows.sort_by(|a, b| {
-        use std::cmp::Ordering;
-        let ka = (
-            a.pinned,
-            a.preview.to_lowercase().find(&first).unwrap_or(usize::MAX),
-            a.last_used_at,
-        );
-        let kb = (
-            b.pinned,
-            b.preview.to_lowercase().find(&first).unwrap_or(usize::MAX),
-            b.last_used_at,
-        );
-        match kb.0.cmp(&ka.0) {
-            Ordering::Equal => match ka.1.cmp(&kb.1) {
-                Ordering::Equal => kb.2.cmp(&ka.2),
-                other => other,
-            },
-            other => other,
-        }
-    });
 }

@@ -227,7 +227,7 @@ pub fn tokenize(query: &str) -> Vec<String> {
             continue;
         }
         let low = t.to_lowercase();
-        if !out.iter().any(|e| *e == low) {
+        if !out.contains(&low) {
             out.push(low);
         }
     }
