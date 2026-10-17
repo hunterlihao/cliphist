@@ -329,6 +329,9 @@ struct PopupState {
     /// 呼出时定下的锚点：(x, 固定边 y, 是否朝上翻)。之后行数变化只改高度，
     /// 位置纹丝不动 —— 打字时弹窗会跑，比丑难受得多。
     anchor: Option<(i32, i32, bool)>,
+    /// 右键菜单打开期间置位：此时窗口失去激活是"菜单拿走了焦点"，
+    /// 不是"用户点了别处"，绝不能因此关窗。
+    menu_open: bool,
     /// 仅预览模式用：离屏渲染不包含子窗口（EDIT），所以由父窗口代画输入框内容
     /// （空字符串表示"空输入框"，会画一根光标），这样预览图才跟用户看到的一致。
     preview_text: Option<String>,
@@ -362,6 +365,7 @@ impl PopupState {
             status: None,
             query: String::new(),
             rounded: false,
+            menu_open: false,
             anchor: None,
             preview_text: None,
         }
@@ -1032,7 +1036,8 @@ unsafe fn dispatch(hwnd: HWND, out: Outcome) {
         }
         Outcome::Context { id } => {
             if !owner.is_null() {
-                PostMessageW(owner, WM_POPUP_CONTEXT, 0, id as isize);
+                // wParam 带上自己：控制器才知道该给哪个窗口加"菜单保护"。
+                PostMessageW(owner, WM_POPUP_CONTEXT, hwnd as usize, id as isize);
             }
         }
         Outcome::Pin { id } => {
@@ -1212,8 +1217,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             return 0;
         }
         WM_ACTIVATE => {
-            // 点别处 / 切走即关闭（Win+V 的手感）。先判可见性，避免 ShowWindow 递归回来时反复 hide。
-            if (wp & 0xFFFF) as u32 == 0 && is_visible(hwnd) {
+            // 点别处 / 切走即关闭 —— 这是**浮动列表**的手感（Win+V 那样）。
+            //
+            // 主窗口不能照抄：右键菜单、Alt+Tab、点一下别的窗口都会让它短暂失活，
+            // 若也跟着关掉，用户一在主窗口里右键，整个窗口就没了（真 bug）。
+            // 主窗口只在按 ✕ / Esc 时关闭。
+            let (popup_mode, menu_open) = state(hwnd)
+                .map(|st| (st.mode == Mode::Popup, st.menu_open))
+                .unwrap_or((false, false));
+            // 菜单打开时失去激活是"菜单拿走了焦点"，不是用户点了别处 —— 不能关窗。
+            if (wp & 0xFFFF) as u32 == 0 && popup_mode && !menu_open && is_visible(hwnd) {
                 dispatch(hwnd, Outcome::Close);
             }
             return 0;
@@ -1485,6 +1498,13 @@ pub fn selected_id(hwnd: HWND) -> Option<i64> {
 pub fn invalidate(hwnd: HWND) {
     unsafe {
         windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 0);
+    }
+}
+
+/// 标记/清除"右键菜单打开中"。
+pub fn set_menu_open(hwnd: HWND, open: bool) {
+    if let Some(st) = unsafe { state(hwnd) } {
+        st.menu_open = open;
     }
 }
 

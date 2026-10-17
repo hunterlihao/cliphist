@@ -694,7 +694,10 @@ impl App {
 
     /// 条目右键菜单。必须在控制器窗口上弹：`TrackPopupMenu` 会泵消息，
     /// 交给弹窗去弹会破坏它"窗口过程不被重入"的前提。
-    fn item_menu(&mut self, id: i64) {
+    fn item_menu(&mut self, target: HWND, id: i64) {
+        // 菜单是模态的：弹出期间列表窗口会失活。先挂上"菜单保护"，
+        // 否则 WM_ACTIVATE 会把窗口当成"点了别处"直接关掉。
+        popup::set_menu_open(target, true);
         let kind = self.read.get_kind(id).ok().flatten();
         let pinned = self.read.get_pinned(id).unwrap_or(false);
         let files = if kind == Some(Kind::Files) {
@@ -725,7 +728,13 @@ impl App {
         }
 
         let pos = tray::cursor_pos();
-        let Some(cmd) = tray::popup_menu(self.hwnd, pos.x, pos.y, &items) else {
+        let cmd = tray::popup_menu(self.hwnd, pos.x, pos.y, &items);
+        // 菜单关闭后再解除保护：期间窗口失活不算"点别处"。
+        popup::set_menu_open(target, false);
+        if !target.is_null() && popup::is_visible(target) {
+            popup::bring_to_front(target);
+        }
+        let Some(cmd) = cmd else {
             return;
         };
         match cmd {
@@ -1217,10 +1226,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         popup::WM_POPUP_CONTEXT => {
             let id = lp as i64;
+            let target = wp as HWND;
             APP.with(|c| {
                 if let Ok(mut g) = c.try_borrow_mut() {
                     if let Some(app) = g.as_mut() {
-                        app.item_menu(id);
+                        app.item_menu(target, id);
                     }
                 }
             });
