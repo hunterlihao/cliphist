@@ -478,9 +478,14 @@ impl App {
         }
     }
 
-    fn query_rows(&self) -> Vec<ItemRow> {
-        let q = popup::current_query(self.popup);
+    /// 按指定列表窗口当前的搜索词查一页。
+    fn query_rows_for(&self, hwnd: HWND) -> Vec<ItemRow> {
+        let q = popup::current_query(hwnd);
         self.read.list_page(&q, PAGE_LIMIT).unwrap_or_default()
+    }
+
+    fn query_rows(&self) -> Vec<ItemRow> {
+        self.query_rows_for(self.popup)
     }
 
     fn popup_status(&self) -> Option<String> {
@@ -510,7 +515,7 @@ impl App {
         {
             self.target = fg;
         }
-        let rows = self.query_rows();
+        let rows = self.query_rows_for(self.popup);
         let status = self.popup_status();
         popup::show(self.popup, rows, status);
     }
@@ -526,6 +531,11 @@ impl App {
 
     /// 显示/隐藏居中的主窗口。托盘单击走这里。
     fn toggle_main(&mut self) {
+        diag(format_args!(
+            "toggle_main: hwnd={:?} visible={}",
+            self.main_hwnd,
+            popup::is_visible(self.main_hwnd)
+        ));
         if popup::is_visible(self.main_hwnd) {
             popup::hide(self.main_hwnd);
             return;
@@ -540,7 +550,7 @@ impl App {
         {
             self.target = fg;
         }
-        let rows = self.query_rows();
+        let rows = self.query_rows_for(self.main_hwnd);
         let status = self.popup_status();
         popup::show(self.main_hwnd, rows, status);
     }
@@ -1072,13 +1082,22 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             match event {
                 // 托盘左键：打开**居中的主窗口**（要"待在屏幕上"的那种）。
                 // 随手呼出的浮动列表留给全局热键 —— 那个要的是快、跟着光标。
-                WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_SELECT => APP.with(|c| {
-                    if let Ok(mut g) = c.try_borrow_mut() {
-                        if let Some(app) = g.as_mut() {
-                            app.toggle_main();
+                WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_SELECT => {
+                    let busy = APP.with(|c| match c.try_borrow_mut() {
+                        Ok(mut g) => {
+                            if let Some(app) = g.as_mut() {
+                                app.toggle_main();
+                            }
+                            false
                         }
+                        Err(_) => true,
+                    });
+                    // 初始化（托盘/监听/热键/开场动画）期间 App 正被借用：这时托盘单击
+                    // 不能丢，延后一拍重投给自己，等借用结束再处理。
+                    if busy {
+                        unsafe { PostMessageW(hwnd, msg, wp, lp) };
                     }
-                }),
+                }
                 WM_RBUTTONUP | WM_CONTEXTMENU => APP.with(|c| {
                     if let Ok(mut g) = c.try_borrow_mut() {
                         if let Some(app) = g.as_mut() {
@@ -1113,11 +1132,23 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             return 0;
         }
         popup::WM_POPUP_QUERY => {
+            // wParam 是"谁在打字"（浮动列表 or 主窗口）。早先这里写死了 popup，
+            // 于是在主窗口里搜关键字，结果全被塞去了另一个窗口 —— 看起来就是"搜索没用"。
+            let target = wp as HWND;
             APP.with(|c| {
                 if let Ok(mut g) = c.try_borrow_mut() {
                     if let Some(app) = g.as_mut() {
-                        let rows = app.query_rows();
-                        popup::set_rows(app.popup, rows);
+                        if !target.is_null() {
+                            let q = popup::current_query(target);
+                            let rows = app.query_rows_for(target);
+                            diag(format_args!(
+                                "query: target={:?} q={:?} → {} 条",
+                                target,
+                                q,
+                                rows.len()
+                            ));
+                            popup::set_rows(target, rows);
+                        }
                     }
                 }
             });

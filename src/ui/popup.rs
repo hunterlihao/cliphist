@@ -47,6 +47,35 @@ pub const WM_LIST_OPEN_SETTINGS: u32 = WM_APP + 17;
 /// 两者**共用同一个窗口类与同一份绘制代码**：主窗口只是多一条标题栏、宽度更大、
 /// 高度固定，并且打开时在屏幕上绝对居中 —— 而不是跟着鼠标跑。
 /// 这样列表的排版、命中测试、滚动、缩略图逻辑一处修改两边同时生效。
+/// 主窗口标题栏上点到了哪一块。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TitleHit {
+    /// 空白处：整条当系统标题栏，交给它去拖动
+    Drag,
+    Settings,
+    Close,
+    /// 不在标题栏里（或这个窗口没有标题栏）
+    None,
+}
+
+/// 标题栏命中测试（纯函数，便于用单测钉住边界）。
+///
+/// 这里踩过一个坑：一开始整条标题栏都返回 `HTCAPTION`，结果**按钮永远点不到** ——
+/// 点击被当成"拖动标题栏"由系统吃掉了，根本走不到 `WM_LBUTTONDOWN`。
+/// 所以拖动区必须把右侧两个按钮挖掉。
+pub fn title_hit(m: &Metrics, x: i32, y: i32) -> TitleHit {
+    if m.title_h <= 0 || y < 0 || y >= m.title_h || x < 0 {
+        return TitleHit::None;
+    }
+    if x >= m.width - m.title_h {
+        return TitleHit::Close;
+    }
+    if x >= m.width - 2 * m.title_h {
+        return TitleHit::Settings;
+    }
+    TitleHit::Drag
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Popup,
@@ -362,7 +391,10 @@ impl PopupState {
                 10,
                 10,
                 self.hwnd,
-                std::ptr::null_mut(),
+                // hMenu 就是子控件的 ID。这里曾经传 null（ID=0），于是 EDIT 发来的
+                // EN_CHANGE 里 id 恒为 0，而 WM_COMMAND 里判断的是 EDIT_ID —— 每条
+                // 通知都被丢掉，表现就是"搜索框能打字但列表不动"。
+                EDIT_ID as isize as *mut core::ffi::c_void,
                 hinstance,
                 std::ptr::null(),
             )
@@ -1124,7 +1156,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 let text = read_edit_text(st.edit);
                 if text != st.query {
                     st.query = text;
-                    PostMessageW(st.owner, WM_POPUP_QUERY, 0, 0);
+                    // wParam 带上自己的窗口句柄：浮动列表和主窗口共用一个控制器，
+                    // 不说是谁在打字，控制器就只能去更新固定那一个（真 bug）。
+                    PostMessageW(st.owner, WM_POPUP_QUERY, hwnd as usize, 0);
                 }
             }
             return 0;
@@ -1148,8 +1182,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             return 0;
         }
         WM_NCHITTEST => {
-            // 主窗口没有系统标题栏，但拖动必须保留：标题栏那一横条整片返回 HTCAPTION，
-            // 剩下的区域交给客户区自己处理。
+            // 主窗口没有系统标题栏，拖动必须保留；但**只有标题栏的空白部分**返回
+            // HTCAPTION —— 右侧"设置 / ✕"必须留给客户区，否则点击会被当成拖动吃掉。
             let m = state(hwnd).map(|st| st.metrics);
             if let Some(m) = m {
                 if m.title_h > 0 {
@@ -1158,7 +1192,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                         y: hiword(lp),
                     };
                     unsafe { ScreenToClient(hwnd, &mut pt) };
-                    if pt.y >= 0 && pt.y < m.title_h {
+                    if title_hit(&m, pt.x, pt.y) == TitleHit::Drag {
                         return HTCAPTION as isize;
                     }
                 }
@@ -1168,22 +1202,21 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_LBUTTONDOWN => {
             // 主窗口的标题栏按钮：先算命中（拿到纯值），再动作 —— 因为
             // hide() 会同步派发消息，动作期间不能还握着 &mut PopupState。
-            let hit = state(hwnd).map(|st| {
-                let m = st.metrics;
-                (m.title_h, st.settings_rect(), st.close_rect(), st.owner)
-            });
-            if let Some((title_h, settings_rc, close_rc, owner)) = hit {
-                if title_h > 0 {
-                    let (x, y) = (loword(lp), hiword(lp));
-                    if y < title_h {
-                        let inside = |r: &RECT| x >= r.left && x < r.right;
-                        if inside(&close_rc) {
-                            hide(hwnd);
-                        } else if inside(&settings_rc) && !owner.is_null() {
+            let title_click =
+                state(hwnd).map(|st| (title_hit(&st.metrics, loword(lp), hiword(lp)), st.owner));
+            if let Some((hit, owner)) = title_click {
+                match hit {
+                    TitleHit::Close => {
+                        hide(hwnd);
+                        return 0;
+                    }
+                    TitleHit::Settings => {
+                        if !owner.is_null() {
                             unsafe { PostMessageW(owner, WM_LIST_OPEN_SETTINGS, 0, 0) };
                         }
                         return 0;
                     }
+                    TitleHit::Drag | TitleHit::None => {}
                 }
             }
 
@@ -1464,6 +1497,40 @@ fn hiword(lp: LPARAM) -> i32 {
 
 fn is_down(vk: i32) -> bool {
     unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState(vk) < 0 }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn title_bar_hit_areas_are_disjoint() {
+        let m = Metrics::main_window(96);
+        // 左侧空白 = 拖动区
+        assert_eq!(title_hit(&m, 0, 5), TitleHit::Drag);
+        assert_eq!(title_hit(&m, m.width / 2, 5), TitleHit::Drag);
+        // 右起第一格 = 关闭，第二格 = 设置（顺序与绘制一致）
+        assert_eq!(title_hit(&m, m.width - 1, 5), TitleHit::Close);
+        assert_eq!(title_hit(&m, m.width - m.title_h, 5), TitleHit::Close);
+        assert_eq!(
+            title_hit(&m, m.width - m.title_h - 1, 5),
+            TitleHit::Settings
+        );
+        assert_eq!(
+            title_hit(&m, m.width - 2 * m.title_h, 5),
+            TitleHit::Settings
+        );
+        // 边界：设置区左边一格必须回到拖动区（按钮不能吞掉整条标题栏）
+        assert_eq!(
+            title_hit(&m, m.width - 2 * m.title_h - 1, 5),
+            TitleHit::Drag
+        );
+        // 标题栏以下不是标题栏
+        assert_eq!(title_hit(&m, 100, m.title_h), TitleHit::None);
+        // 浮动列表根本没有标题栏
+        let p = Metrics::new(96);
+        assert_eq!(title_hit(&p, 10, 5), TitleHit::None);
+    }
 }
 
 #[cfg(test)]
