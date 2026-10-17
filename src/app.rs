@@ -356,6 +356,8 @@ struct App {
     hotkey_ok: bool,
     /// 托盘图标创建失败（受限权限/外壳不可用）。程序照常运行，只在页脚提示。
     tray_failed: bool,
+    /// 上一次托盘单击的时间：用于去掉重复通知。
+    last_tray_click: Option<std::time::Instant>,
 }
 
 thread_local! {
@@ -425,6 +427,7 @@ impl App {
             wake_msg: 0,
             hotkey_ok: false,
             tray_failed: false,
+            last_tray_click: None,
         };
         app.refresh_limits();
 
@@ -532,6 +535,20 @@ impl App {
     }
 
     /// 显示/隐藏居中的主窗口。托盘单击走这里。
+    /// 托盘单击。一次点击可能连发两条通知（`NIN_SELECT` + `WM_LBUTTONUP`），
+    /// 直接各 toggle 一次就会"开了又关"，表现为点了没反应 —— 所以先做 350ms 去抖。
+    fn tray_click(&mut self) {
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_tray_click {
+            if now.duration_since(last) < std::time::Duration::from_millis(350) {
+                diag(format_args!("tray: 去抖，忽略重复通知"));
+                return;
+            }
+        }
+        self.last_tray_click = Some(now);
+        self.toggle_main();
+    }
+
     fn toggle_main(&mut self) {
         diag(format_args!(
             "toggle_main: hwnd={:?} visible={}",
@@ -539,6 +556,12 @@ impl App {
             popup::is_visible(self.main_hwnd)
         ));
         if popup::is_visible(self.main_hwnd) {
+            // 可见但没在前台（比如被别的窗口盖住）→ 先把窗口提到前面，
+            // 而不是直接关掉。否则用户的第一下点击看上去就是"什么都没发生"。
+            if !popup::is_foreground(self.main_hwnd) {
+                popup::bring_to_front(self.main_hwnd);
+                return;
+            }
             popup::hide(self.main_hwnd);
             return;
         }
@@ -1124,7 +1147,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     let busy = APP.with(|c| match c.try_borrow_mut() {
                         Ok(mut g) => {
                             if let Some(app) = g.as_mut() {
-                                app.toggle_main();
+                                app.tray_click();
                             }
                             false
                         }

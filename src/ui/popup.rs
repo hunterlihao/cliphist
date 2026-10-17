@@ -16,19 +16,21 @@ use windows_sys::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, WHITE_BRUSH,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
-    GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
+    BringWindowToTop, CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    GetClientRect, GetCursorPos, GetForegroundWindow, GetParent, GetWindowLongPtrW,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
     LoadCursorW, MoveWindow, PostMessageW, RegisterClassExW, SendMessageW, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CS_DBLCLKS,
     CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_LEFT, HTCAPTION, HTCLIENT,
-    HWND_TOPMOST, IDC_ARROW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_ACTIVATE, WM_APP,
-    WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_DESTROY, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
-    WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WM_SYSKEYDOWN, WNDCLASSEXW, WNDPROC,
-    WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    HWND_TOPMOST, IDC_ARROW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW,
+    WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_DESTROY,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WM_SYSKEYDOWN, WNDCLASSEXW,
+    WNDPROC, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::core::model::{ItemRow, Kind};
@@ -1404,6 +1406,38 @@ pub fn hide(hwnd: HWND) {
     if let Some(owner) = owner {
         unsafe { PostMessageW(owner, WM_POPUP_CLOSED, 0, 0) };
     }
+}
+
+/// 把窗口提到最前并尝试取得前台焦点。
+///
+/// 托盘点击后 `SetForegroundWindow` 经常被 Windows 的"前台锁定"拒绝，结果窗口虽然
+/// ShowWindow 了却压在别的窗口后面 —— 用户看到的就是"点了没反应，再点一下才有"。
+/// 这里用 AttachThreadInput 借用前台线程的输入队列，是托盘类程序的标准做法。
+pub fn bring_to_front(hwnd: HWND) {
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        let fg = GetForegroundWindow();
+        let tid_cur = GetCurrentThreadId();
+        let tid_fg = GetWindowThreadProcessId(fg, std::ptr::null_mut());
+        let attached = !fg.is_null() && tid_fg != 0 && tid_fg != tid_cur && {
+            AttachThreadInput(tid_cur, tid_fg, 1) != 0
+        };
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        if attached {
+            AttachThreadInput(tid_cur, tid_fg, 0);
+        }
+    }
+}
+
+/// 当前前台窗口是不是它。
+pub fn is_foreground(hwnd: HWND) -> bool {
+    !hwnd.is_null() && unsafe { GetForegroundWindow() } == hwnd
 }
 
 pub fn is_visible(hwnd: HWND) -> bool {
