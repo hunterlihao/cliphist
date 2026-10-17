@@ -31,4 +31,4 @@ jobs:
         run: cargo build --release
 
       - name: 自检（存储与图片编解码）
-        run: .\target\release\ClipHist.exe --selftest
+        run: .\target\x86_64-pc-windows-msvc\release\ClipHist.exe --selftest
