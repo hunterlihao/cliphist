@@ -87,6 +87,20 @@ pub fn parse_dib(bytes: &[u8]) -> Option<DibInfo> {
         (0x00FF_0000, 0x0000_FF00, 0x0000_00FF, 0xFF00_0000, 0)
     };
 
+    // 有些截图工具写的是 V4/V5 头，却把 RGB 掩码字段全部留成 0（语义上等于"默认 BGRA"）。
+    // 若照掩码取值，`extract(v, 0)` 恒为 0 —— 整张图变成**纯黑**。
+    // 这就是"截图复制进来变成黑图"的根因，必须回落到默认 BGRA。
+    let (red, green, blue, alpha) = if red == 0 && green == 0 && blue == 0 {
+        (
+            0x00FF_0000,
+            0x0000_FF00,
+            0x0000_00FF,
+            if bit_count == 32 { 0xFF00_0000 } else { 0 },
+        )
+    } else {
+        (red, green, blue, alpha)
+    };
+
     let pixel_offset = header_size + mask_bytes;
     if pixel_offset > bytes.len() {
         return None;
@@ -311,6 +325,28 @@ mod tests {
         let info = parse_dib(&b).unwrap();
         let (_, _, rgba) = dib_to_rgba(&b, &info).unwrap();
         assert_eq!(rgba, vec![30, 20, 10, 255]);
+    }
+
+    #[test]
+    #[test]
+    fn zero_masks_fall_back_to_default_bgra() {
+        // 截图工具常见的写法：V5 头（124 字节），但 RGB 掩码字段全 0。
+        // 照掩码取值会得到全黑，必须回落到默认 BGRA 布局。
+        let mut b = vec![0u8; BITMAPV5HEADER_SIZE];
+        b[0..4].copy_from_slice(&(BITMAPV5HEADER_SIZE as u32).to_le_bytes());
+        b[4..8].copy_from_slice(&2i32.to_le_bytes()); // 宽
+        b[8..12].copy_from_slice(&1i32.to_le_bytes()); // 高
+        b[14..16].copy_from_slice(&32u16.to_le_bytes()); // 32bpp
+                                                         // biCompression = BI_RGB(0)、掩码 40..56 保持 0 —— 正是问题现场
+        b.extend_from_slice(&[30, 20, 10, 0, 60, 50, 40, 0]);
+        let info = parse_dib(&b).expect("应当能解析");
+        assert_eq!(info.red_mask, 0x00FF_0000, "RGB 掩码必须回落");
+        assert_eq!(info.alpha_mask, 0xFF00_0000);
+        let (w, h, rgba) = dib_to_rgba(&b, &info).expect("应当能解码");
+        assert_eq!((w, h), (2, 1));
+        // 前两个像素是 (B,G,R)=(30,20,10)/(60,50,40) → RGB (10,20,30)/(40,50,60)
+        assert_eq!(&rgba[0..4], &[10, 20, 30, 255]);
+        assert_eq!(&rgba[4..8], &[40, 50, 60, 255]);
     }
 
     #[test]
