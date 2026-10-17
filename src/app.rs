@@ -659,6 +659,11 @@ impl App {
             self.balloon("队列是空的", "在列表里按空格把条目加入队列。", false);
             return;
         }
+        // 目标窗口必须"现取"：`self.target` 是打开列表那一刻记下的，
+        // 而按 Ctrl+Alt+V 时用户往往已经切到别的输入框，旧句柄要么已销毁、
+        // 要么是另一个窗口 —— 那就会只写剪贴板、不发送 Ctrl+V，
+        // 表现出来就是"按了一下只前进一条，还得手动再按 Ctrl+V"。
+        self.refresh_paste_target();
         let id = self.queue.remove(0);
         diag(format_args!(
             "queue: 粘贴下一条 id={id} 剩余={}",
@@ -666,6 +671,19 @@ impl App {
         ));
         self.choose(id, false);
         self.sync_queue(std::ptr::null_mut());
+    }
+
+    /// 把粘贴目标刷新为"当前前台窗口"（排除我们自己的窗口）。
+    fn refresh_paste_target(&mut self) {
+        let fg = clipboard::foreground_window();
+        if !fg.is_null()
+            && fg != self.popup
+            && fg != self.main_hwnd
+            && fg != self.hwnd
+            && fg != self.settings_hwnd
+        {
+            self.target = fg;
+        }
     }
 
     fn toggle_main(&mut self) {
