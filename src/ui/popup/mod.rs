@@ -659,7 +659,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_SIZE => {
             // 主窗口可缩放：把新的客户区尺寸写回度量，排版随之重算。
             if let Some(st) = state(hwnd) {
-                if st.mode == Mode::Main {
+                // 只在窗口**已经显示**之后才把尺寸写回度量。
+                // 创建瞬间也会来一次 WM_SIZE（初始 420×300），若照单全收，
+                // 默认尺寸就被改小了 —— 主窗口会以 420×300 打开（这就是"默认太小"的成因）。
+                let visible = unsafe { IsWindowVisible(hwnd) } != 0;
+                if st.mode == Mode::Main && (visible || st.resizing.is_some()) {
                     let (w, h) = (loword(lp), hiword(lp));
                     if w > 0 && h > 0 {
                         st.metrics.width = w;
