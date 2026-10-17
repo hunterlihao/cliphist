@@ -25,6 +25,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
     "Win32_System_ProcessStatus",
     "Win32_System_Time",
+    # CLI 模式把输出接回调用者终端（GUI 子系统进程本身没有控制台）
+    "Win32_System_Console",
+    # 窗口圆角（Win11 的 DWM 属性）；不支持时静默降级
+    "Win32_Graphics_Dwm",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",

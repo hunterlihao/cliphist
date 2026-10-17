@@ -7,20 +7,18 @@
 use windows_sys::Win32::Foundation::{COLORREF, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     AlphaBlend, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW,
-    CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, FillRect, GetDC,
+    CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, FillRect, GetDC, GetDIBits,
     GetStockObject, GetTextExtentPoint32W, GetTextMetricsW, ReleaseDC, RoundRect, SelectObject,
-    SetBkMode, SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, CLEARTYPE_QUALITY,
-    CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DIB_RGB_COLORS, DT_CENTER,
-    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD,
-    FW_NORMAL, HBITMAP, HBRUSH, HDC, HFONT, HGDIOBJ, HPEN, OUT_DEFAULT_PRECIS, PS_SOLID, SRCCOPY,
-    TEXTMETRICW, TRANSPARENT, VARIABLE_PITCH,
+    SetBkMode, SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_GUI_FONT,
+    DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
+    FF_DONTCARE, FW_BOLD, FW_MEDIUM, FW_NORMAL, HBITMAP, HBRUSH, HDC, HFONT, HGDIOBJ, HOLLOW_BRUSH,
+    HPEN, OUT_DEFAULT_PRECIS, PS_SOLID, RGBQUAD, SRCCOPY, TEXTMETRICW, TRANSPARENT, VARIABLE_PITCH,
 };
 
 use crate::image::thumb::decode_png_rgba;
 use crate::ui::theme::{font, Metrics};
 use crate::win::strings::to_wide;
-
-const BI_RGB: u32 = 0;
 
 /// 字体集合：每个 DPI 创建一次，随窗口一起释放。
 pub struct Fonts {
@@ -45,10 +43,13 @@ impl Fonts {
                 unsafe { GetStockObject(DEFAULT_GUI_FONT) as HFONT }
             }
         };
-        let ui = make(m.fs_preview, FW_NORMAL, font::UI);
+        // 预览用 Medium(500)：中文在 15px 下 400 显得发虚，500 压得住版面，
+        // 又不像 Bold 那样把一整列文字糊成黑块。
+        let ui = make(m.fs_preview, FW_MEDIUM, font::UI);
         let ui_bold = make(m.fs_preview, FW_BOLD, font::UI);
         let meta = make(m.fs_meta, FW_NORMAL, font::UI);
-        let badge = make(m.fs_badge, FW_NORMAL, font::UI);
+        // 标签与"机器值"统一走等宽：字段名、时间、计数、尺寸，能竖着对齐。
+        let badge = make(m.fs_label, FW_NORMAL, font::MONO);
         let mono = make(m.fs_mono, FW_NORMAL, font::MONO);
         Fonts {
             ui,
@@ -173,6 +174,61 @@ impl MemDc {
             BitBlt(dst, 0, 0, self.w, self.h, self.dc, 0, 0, SRCCOPY);
         }
     }
+
+    /// 把离屏位图读成 RGBA —— 开发者预览（`--render-preview`）用。
+    ///
+    /// `GetDIBits` 要求位图**没有**被选进 DC，所以这里临时把原来的位图选回去、
+    /// 读完再把我们的位图选回来，保持对象状态不变。
+    pub fn to_rgba(&mut self) -> Option<Vec<u8>> {
+        if self.w <= 0 || self.h <= 0 {
+            return None;
+        }
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: self.w,
+                biHeight: -self.h, // 负数 = 自上而下，读出来就是屏幕上看到的方向
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [RGBQUAD {
+                rgbBlue: 0,
+                rgbGreen: 0,
+                rgbRed: 0,
+                rgbReserved: 0,
+            }],
+        };
+        let mut buf = vec![0u8; (self.w * self.h * 4) as usize];
+        let ok = unsafe {
+            SelectObject(self.dc, self.old);
+            let ok = GetDIBits(
+                self.dc,
+                self.bmp,
+                0,
+                self.h as u32,
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+            SelectObject(self.dc, self.bmp as HGDIOBJ);
+            ok
+        };
+        if ok == 0 {
+            return None;
+        }
+        // DDB 没有 alpha 通道：BGRA → RGBA，并补上不透明。
+        for px in buf.chunks_exact_mut(4) {
+            px.swap(0, 2);
+            px[3] = 255;
+        }
+        Some(buf)
+    }
 }
 
 impl Drop for MemDc {
@@ -243,6 +299,29 @@ pub fn round_fill(dc: HDC, rc: &RECT, color: COLORREF, radius: i32) {
         SelectObject(dc, ob);
         SelectObject(dc, op);
         DeleteObject(brush as HGDIOBJ);
+        DeleteObject(pen as HGDIOBJ);
+    }
+}
+
+/// 圆角描边（空心）。用于 DWM 已给窗口圆角时画外框 ——
+/// 直角的 1px 边框会从圆角窗口的四个角里探出来。
+pub fn round_frame(dc: HDC, rc: &RECT, color: COLORREF, radius: i32) {
+    unsafe {
+        let brush = GetStockObject(HOLLOW_BRUSH);
+        let pen: HPEN = CreatePen(PS_SOLID, 1, color);
+        let ob = SelectObject(dc, brush);
+        let op = SelectObject(dc, pen as HGDIOBJ);
+        RoundRect(
+            dc,
+            rc.left,
+            rc.top,
+            rc.right,
+            rc.bottom,
+            radius * 2,
+            radius * 2,
+        );
+        SelectObject(dc, ob);
+        SelectObject(dc, op);
         DeleteObject(pen as HGDIOBJ);
     }
 }

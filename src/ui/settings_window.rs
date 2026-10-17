@@ -85,12 +85,12 @@ impl Layout {
     pub fn new(dpi: u32) -> Self {
         let s = |v: i32| ((v as i64 * dpi as i64 + 48) / 96) as i32;
         Self {
-            width: s(470),
-            header_h: s(46),
-            row_h: s(34),
-            footer_h: s(32),
-            pad: s(14),
-            value_x: s(180),
+            width: s(480),
+            header_h: s(44),
+            row_h: s(36),
+            footer_h: s(30),
+            pad: s(16),
+            value_x: s(196),
         }
     }
 
@@ -371,36 +371,28 @@ impl SettingsState {
     fn render(&self, dc: HDC, w: i32, h: i32) {
         let l = self.layout;
         gdi::fill(dc, &rect(0, 0, w, h), color::PAPER);
-        // 标题
-        let title = rect(l.pad, 0, w - l.header_h, l.header_h);
-        gdi::text(
-            dc,
-            self.fonts.ui_bold,
-            color::INK,
-            &title,
-            &format!("{} · 设置", crate::APP_TITLE),
-            false,
-        );
-        gdi::hline(dc, 0, w, l.header_h - 1, color::RULE);
+        // 标题：与弹窗同一套语法 —— 一条实线横栏 + 一行字，安静但清楚。
+        let title = rect(l.pad, 0, w - l.header_h, l.header_h - 2);
+        gdi::text(dc, self.fonts.ui, color::INK, &title, "设置", false);
+        gdi::hline(dc, 0, w, l.header_h - 1, color::RULE_STRONG);
 
         // 关闭按钮
         let cb = close_button_rect(&l);
-        gdi::text(dc, self.fonts.ui, color::INK2, &cb, "✕", true);
+        gdi::text(dc, self.fonts.ui, color::INK3, &cb, "✕", true);
 
         for (i, kind) in ROWS.iter().enumerate() {
             let top = l.row_top(i);
             let row = rect(0, top, w, top + l.row_h);
             if self.hover == Some(i) {
                 gdi::fill(dc, &row, color::HOVER);
-            } else if i + 1 < ROWS.len() {
-                gdi::hline(dc, l.pad, w - l.pad, row.bottom - 1, color::RULE);
             }
+            // 索引式层级：条目名走 11px 次级灰（安静），值走 15px 主墨（真正要读的）。
+            // 数据文件路径例外 —— 长路径必须走等宽小字才塞得下。
             let label = rect(l.pad, top, l.value_x - l.pad, top + l.row_h);
-            let dim = kind == &RowKind::DataPath;
             gdi::text(
                 dc,
-                self.fonts.ui,
-                if dim { color::INK3 } else { color::INK },
+                self.fonts.meta,
+                color::INK2,
                 &label,
                 Self::label(*kind),
                 false,
@@ -408,18 +400,22 @@ impl SettingsState {
 
             let is_path = *kind == RowKind::DataPath;
             let value = rect(l.value_x, top, w - l.pad, top + l.row_h);
-            let f = if is_path {
-                self.fonts.mono
-            } else {
-                self.fonts.ui
-            };
             let vcolor = match kind {
                 RowKind::Clear if self.confirm_clear => color::WARN,
                 RowKind::Hotkey if self.capturing => color::WARN,
                 RowKind::DataPath => color::INK3,
-                _ => color::INK2,
+                _ => color::INK,
+            };
+            let f = if is_path {
+                self.fonts.badge
+            } else {
+                self.fonts.ui
             };
             gdi::text(dc, f, vcolor, &value, &self.value(*kind), false);
+
+            if i + 1 < ROWS.len() {
+                gdi::hline(dc, l.pad, w - l.pad, row.bottom - 1, color::RULE);
+            }
         }
 
         // 页脚
@@ -685,6 +681,23 @@ pub fn show(hwnd: HWND, values: Settings, data_path: &str) {
 /// 取回窗口里被改过的设置。
 pub fn take_settings(hwnd: HWND) -> Option<Settings> {
     unsafe { state(hwnd).map(|st| st.values.clone()) }
+}
+
+/// 开发者预览：把设置窗口渲染成 RGBA（不显示窗口、不写注册表、不落库）。
+pub fn render_preview(
+    hwnd: HWND,
+    values: Settings,
+    data_path: &str,
+    w: i32,
+    h: i32,
+) -> Option<Vec<u8>> {
+    let st = unsafe { state(hwnd) }?;
+    st.values = values;
+    st.data_path = data_path.to_string();
+    st.hover = Some(2);
+    let mut mem = MemDc::new(w, h)?;
+    st.render(mem.dc(), w, h);
+    mem.to_rgba()
 }
 
 pub fn is_visible(hwnd: HWND) -> bool {

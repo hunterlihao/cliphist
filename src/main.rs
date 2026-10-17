@@ -4,12 +4,74 @@
 //! - `--autostart`：开机自启时由注册表拉起，安静启动（不弹首启气泡）。
 //! - `--selftest`：跑一遍存储/编解码自检后退出（给脚本与验收用，不开窗口）。
 //! - `--version` / `-v`：打印版本。
+//!
+//! **GUI 子系统**：这个属性决定双击时不会分配控制台窗口 —— 否则每次启动都会先闪一个
+//! 黑色终端窗口。代价是进程默认没有 stdout，所以 CLI 模式需要显式把标准输出接回
+//! 调用者的终端，见 [`attach_console_for_cli`]。
+#![windows_subsystem = "windows"]
 
 use std::process::ExitCode;
 
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, TranslateMessage, MSG,
+    DispatchMessageW, GetMessageW, MessageBoxW, TranslateMessage, MB_ICONERROR, MB_OK, MSG,
 };
+
+/// CLI 模式下把标准输出接回调用方终端。
+///
+/// 关键细节：**只在标准输出确实不可用**时才接管。用户若写了
+/// `ClipHist.exe --selftest > out.txt`，那个重定向句柄本来有效，
+/// 此时再去 AttachConsole 并 `SetStdHandle(CONOUT$)` 会把重定向吞掉
+/// （输出跑到终端里，文件是空的）。
+fn attach_console_for_cli() {
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
+    };
+
+    unsafe {
+        let existing = GetStdHandle(STD_OUTPUT_HANDLE);
+        if !existing.is_null() && existing != INVALID_HANDLE_VALUE {
+            return; // 已被重定向，别动它
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return; // 没有可挂的控制台（例如从资源管理器启动）
+        }
+        let name = cliphist::win::strings::to_wide("CONOUT$");
+        let h = CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
+        if h.is_null() || h == INVALID_HANDLE_VALUE {
+            return;
+        }
+        SetStdHandle(STD_OUTPUT_HANDLE, h);
+        SetStdHandle(STD_ERROR_HANDLE, h);
+    }
+}
+
+/// 启动期致命错误：GUI 模式下没有终端可打印，只能用消息框把原因说清楚。
+fn fatal(message: &str, code: u8) -> ExitCode {
+    let title = cliphist::win::strings::to_wide(cliphist::APP_TITLE);
+    let body = cliphist::win::strings::to_wide(message);
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        )
+    };
+    ExitCode::from(code)
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -22,6 +84,20 @@ fn main() -> ExitCode {
         let i = args.iter().position(|a| a == flag)?;
         Some(args.get(i + 1).and_then(|v| v.parse().ok()))
     };
+
+    // 有 CLI 参数才去接控制台；纯 GUI 启动时完全不碰控制台。
+    let is_cli = has("--selftest")
+        || has("--selftest-clipboard")
+        || has("--bench-fill")
+        || has("--render-preview")
+        || has("--render-settings")
+        || has("--version")
+        || has("-v")
+        || has("--help")
+        || has("-h");
+    if is_cli {
+        attach_console_for_cli();
+    }
 
     if has("--version") || has("-v") {
         println!("{} {} (portable)", cliphist::APP_TITLE, cliphist::VERSION);
@@ -40,6 +116,12 @@ fn main() -> ExitCode {
     if let Some(n) = arg_value(&args, "--bench-fill") {
         return bench_fill(n.unwrap_or(500), flag_value("--log"));
     }
+    if let Some(out) = flag_value("--render-preview") {
+        return render_preview_cmd(&out, has("--preview-empty"), flag_value("--preview-query"));
+    }
+    if let Some(out) = flag_value("--render-settings") {
+        return render_settings_cmd(&out);
+    }
 
     // ① DPI 感知必须在创建任何窗口之前设置：否则整个界面会被系统按位图拉伸，中文发虚。
     cliphist::win::dpi::set_process_dpi_awareness();
@@ -53,8 +135,7 @@ fn main() -> ExitCode {
     let hinstance =
         unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null()) };
     if hinstance.is_null() {
-        eprintln!("GetModuleHandleW 失败");
-        return ExitCode::from(2);
+        return fatal("无法获取程序实例句柄，程序无法启动。", 2);
     }
 
     // ③ 注册三个窗口类：控制器（隐藏）、历史弹窗、设置窗口。
@@ -62,14 +143,12 @@ fn main() -> ExitCode {
         || !cliphist::ui::popup::register_class(hinstance)
         || !cliphist::ui::settings_window::register_class(hinstance)
     {
-        eprintln!("窗口类注册失败");
-        return ExitCode::from(3);
+        return fatal("窗口类注册失败，程序无法启动。", 3);
     }
 
     // ④ 控制器窗口始终隐藏，只负责收消息（托盘回调、热键、剪贴板变化）。
     let Some(hwnd) = cliphist::app::create(hinstance) else {
-        eprintln!("创建主窗口失败");
-        return ExitCode::from(4);
+        return fatal("创建主窗口失败，程序无法启动。", 4);
     };
 
     cliphist::app::init_runtime(hwnd, has("--autostart"));
@@ -104,6 +183,219 @@ fn print_help() {
     println!("  --version     打印版本");
     println!();
     println!("数据文件：data.db（程序同目录；该目录不可写时回退到 %LOCALAPPDATA%\\ClipHist）");
+}
+
+/// 开发者预览：把设置窗口渲染成 PNG（不显示窗口、不写注册表、不落库）。
+fn render_settings_cmd(out_path: &str) -> ExitCode {
+    use cliphist::core::settings::Settings;
+    use cliphist::image::thumb::encode_png_rgba;
+    use cliphist::ui::settings_window::{self, Layout};
+
+    let hinstance =
+        unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null()) };
+    if hinstance.is_null() || !settings_window::register_class(hinstance) {
+        eprintln!("窗口类注册失败");
+        return ExitCode::from(3);
+    }
+    let Some(hwnd) = settings_window::create(std::ptr::null_mut(), hinstance) else {
+        eprintln!("创建设置窗口失败");
+        return ExitCode::from(4);
+    };
+    let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
+    let dpi = if dpi == 0 { 96 } else { dpi };
+    let l = Layout::new(dpi);
+    let (w, h) = (l.width, l.height());
+    let values = Settings::default();
+    let sample_path = r"C:\Users\you\AppData\Local\ClipHist\data.db";
+    let Some(rgba) = settings_window::render_preview(hwnd, values, sample_path, w, h) else {
+        eprintln!("渲染失败");
+        settings_window::destroy(hwnd);
+        return ExitCode::from(5);
+    };
+    let png = encode_png_rgba(w as u32, h as u32, &rgba).unwrap_or_default();
+    settings_window::destroy(hwnd);
+    match std::fs::write(out_path, &png) {
+        Ok(()) => {
+            println!("已渲染设置窗口预览：{out_path}（{w}×{h} @ {dpi} dpi）");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("写入 {out_path} 失败：{e}");
+            ExitCode::from(6)
+        }
+    }
+}
+
+/// 开发者预览：把历史弹窗渲染成 PNG（不显示窗口、不碰剪贴板、不碰数据库）。
+///
+/// 用法：`ClipHist.exe --render-preview out.png [--preview-empty] [--preview-query 关键字]`
+fn render_preview_cmd(out_path: &str, empty: bool, query: Option<String>) -> ExitCode {
+    use cliphist::core::model::{ItemRow, Kind};
+    use cliphist::core::store::now_ms;
+    use cliphist::image::thumb::encode_png_rgba;
+    use cliphist::ui::popup;
+    use cliphist::ui::theme::Metrics;
+
+    let hinstance =
+        unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null()) };
+    if hinstance.is_null() || !popup::register_class(hinstance) {
+        eprintln!("窗口类注册失败");
+        return ExitCode::from(3);
+    }
+    let Some(hwnd) = popup::create(std::ptr::null_mut(), hinstance) else {
+        eprintln!("创建弹窗失败");
+        return ExitCode::from(4);
+    };
+
+    // 一张示意用的缩略图：渐变 + 一块亮色，用来检查 AlphaBlend 的缩放与居中。
+    let (tw, th) = (200u32, 120u32);
+    let mut trgba = Vec::with_capacity((tw * th * 4) as usize);
+    for y in 0..th {
+        for x in 0..tw {
+            let in_patch = x > 60 && x < 140 && y > 30 && y < 90;
+            trgba.extend_from_slice(&[
+                if in_patch { 232 } else { (30 + x / 2) as u8 },
+                if in_patch { 226 } else { (60 + y / 2) as u8 },
+                if in_patch {
+                    210
+                } else {
+                    (110 + (x + y) / 4) as u8
+                },
+                255,
+            ]);
+        }
+    }
+    let thumb_png = encode_png_rgba(tw, th, &trgba).unwrap_or_default();
+
+    let now = now_ms();
+    let row = |id: i64,
+               kind: Kind,
+               preview: &str,
+               src: &str,
+               ago_secs: i64,
+               use_count: i64,
+               pinned: bool,
+               extra: (i64, i32, i32)|
+     -> ItemRow {
+        ItemRow {
+            id,
+            kind,
+            preview: preview.to_string(),
+            created_at: now - ago_secs * 1000,
+            last_used_at: now - ago_secs * 1000,
+            use_count,
+            pinned,
+            source_exe: Some(src.to_string()),
+            file_count: extra.0,
+            img_w: extra.1,
+            img_h: extra.2,
+            thumb_state: 1,
+        }
+    };
+
+    let rows = vec![
+        row(
+            1,
+            Kind::Text,
+            "「剪贴板历史」的设计稿已同步到 docs/design.md，注意第 3 节改成了索引页方向",
+            "Code.exe",
+            40,
+            2,
+            false,
+            (0, 0, 0),
+        ),
+        row(
+            2,
+            Kind::Text,
+            "git rebase -i HEAD~3 之后先把 fixup 合并，再 force-with-lease 推上去",
+            "WindowsTerminal.exe",
+            8 * 60,
+            0,
+            false,
+            (0, 0, 0),
+        ),
+        row(
+            3,
+            Kind::Files,
+            "报告 v2.docx、预算.xlsx 等 3 项",
+            "explorer.exe",
+            3 * 3600,
+            0,
+            true,
+            (3, 0, 0),
+        ),
+        row(
+            4,
+            Kind::Image,
+            "图片 1920×1080",
+            "SnippingTool.exe",
+            5 * 3600,
+            1,
+            false,
+            (0, 1920, 1080),
+        ),
+        row(
+            5,
+            Kind::Text,
+            "SELECT id, preview FROM items WHERE pinned = 1 ORDER BY last_used_at DESC;",
+            "ssms.exe",
+            26 * 3600,
+            4,
+            false,
+            (0, 0, 0),
+        ),
+        row(
+            6,
+            Kind::Text,
+            "https://example.com/docs/portable-clipboard?lang=zh-CN",
+            "msedge.exe",
+            3 * 86400,
+            0,
+            false,
+            (0, 0, 0),
+        ),
+        row(
+            7,
+            Kind::Text,
+            "中文与 English 混排，用来检查雅黑 15px 下的字重是否发虚",
+            "WeChat.exe",
+            12 * 86400,
+            0,
+            false,
+            (0, 0, 0),
+        ),
+    ];
+
+    let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
+    let dpi = if dpi == 0 { 96 } else { dpi };
+    let m = Metrics::new(dpi);
+    let w = m.width;
+    let rows = if empty { Vec::new() } else { rows };
+    let h = m.height_for(rows.len());
+    let query = query.unwrap_or_default();
+    let Some(rgba) =
+        popup::render_preview(hwnd, rows.clone(), None, &query, &[(4, thumb_png)], w, h)
+    else {
+        eprintln!("渲染失败");
+        popup::destroy(hwnd);
+        return ExitCode::from(5);
+    };
+    let png = encode_png_rgba(w as u32, h as u32, &rgba).unwrap_or_default();
+    popup::destroy(hwnd);
+
+    match std::fs::write(out_path, &png) {
+        Ok(()) => {
+            println!(
+                "已渲染预览：{out_path}（{w}×{h} @ {dpi} dpi，{} 行）",
+                rows.len()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("写入 {out_path} 失败：{e}");
+            ExitCode::from(6)
+        }
+    }
 }
 
 /// 基准填充：往**当前数据文件**里预填 N 条历史。

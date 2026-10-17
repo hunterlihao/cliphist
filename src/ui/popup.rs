@@ -12,8 +12,8 @@ use std::mem::zeroed;
 
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, GetMonitorInfoW, MonitorFromPoint,
-    HBRUSH, HDC, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, WHITE_BRUSH,
+    BeginPaint, EndPaint, GetMonitorInfoW, MonitorFromPoint, HDC, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, WHITE_BRUSH,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
@@ -22,12 +22,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
     GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
     LoadCursorW, MoveWindow, PostMessageW, RegisterClassExW, SendMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CS_HREDRAW,
-    CS_VREDRAW, ES_AUTOHSCROLL, ES_LEFT, HWND_TOPMOST, IDC_ARROW, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW,
-    WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_DESTROY,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT,
-    WM_RBUTTONUP, WM_SETFONT, WM_SYSKEYDOWN, WNDCLASSEXW, WNDPROC, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CS_DROPSHADOW,
+    CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_LEFT, HWND_TOPMOST, IDC_ARROW, SWP_SHOWWINDOW,
+    SW_HIDE, SW_SHOW, WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_CTLCOLOREDIT, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WM_SYSKEYDOWN, WNDCLASSEXW,
+    WNDPROC, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::core::model::{ItemRow, Kind};
@@ -157,20 +157,20 @@ impl ListNav {
 
 /// 点击 y 坐标 → 行号。
 pub fn row_at(m: &Metrics, top: usize, y: i32) -> Option<usize> {
-    if y < m.search_h {
+    if y < m.header_h {
         return None;
     }
     let list_h = m.list_height();
-    if y >= m.search_h + list_h {
+    if y >= m.header_h + list_h {
         return None;
     }
-    let idx = top + ((y - m.search_h) / m.row_h) as usize;
+    let idx = top + ((y - m.header_h) / m.row_h) as usize;
     Some(idx)
 }
 
 /// 单行矩形。
 pub fn row_rect(m: &Metrics, top: usize, index: usize) -> RECT {
-    let y0 = m.search_h + (index as i32 - top as i32) * m.row_h;
+    let y0 = m.header_h + (index as i32 - top as i32) * m.row_h;
     rect(0, y0, m.width, y0 + m.row_h)
 }
 
@@ -262,9 +262,21 @@ struct PopupState {
     /// 已经向控制器请求过缩略图的 id，避免每帧重复请求。
     requested_thumbs: HashSet<i64>,
     status: Option<String>,
-    well_brush: HBRUSH,
     query: String,
+    /// DWM 是否给了圆角（Win11）。给了就画圆角边框，否则画直角边框，
+    /// 免得那条 1px 边框从圆角窗口的四个角里探出来。
+    rounded: bool,
+    /// 仅预览模式用：离屏渲染不包含子窗口（EDIT），所以由父窗口代画输入框内容
+    /// （空字符串表示"空输入框"，会画一根光标），这样预览图才跟用户看到的一致。
+    preview_text: Option<String>,
 }
+
+/// 我们自己设置搜索框文本期间，忽略随之而来的 `EN_CHANGE`。
+///
+/// 用**静态变量**而不是 `PopupState` 字段，是因为 `SetWindowTextW` 会同步回调父窗口过程：
+/// 那时若再去取一次 `&mut PopupState` 就是别名借用（和 `ShowWindow` 那个坑同一类）。
+static SUPPRESS_EN_CHANGE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 impl PopupState {
     fn new(hwnd: HWND, owner: HWND) -> PopupState {
@@ -284,9 +296,22 @@ impl PopupState {
             thumbs: ThumbCache::new(24),
             requested_thumbs: HashSet::new(),
             status: None,
-            well_brush: std::ptr::null_mut(),
             query: String::new(),
+            rounded: false,
+            preview_text: None,
         }
+    }
+
+    /// 设置搜索框文本，并抑制由此同步触发的 `EN_CHANGE`。
+    fn set_edit_text(&self, text: &str) {
+        if self.edit.is_null() {
+            return;
+        }
+        use std::sync::atomic::Ordering;
+        SUPPRESS_EN_CHANGE.store(true, Ordering::SeqCst);
+        let wide = to_wide(text);
+        unsafe { SetWindowTextW(self.edit, wide.as_ptr()) };
+        SUPPRESS_EN_CHANGE.store(false, Ordering::SeqCst);
     }
 
     /// 创建搜索框子控件。用系统 EDIT 而不是自绘：中文输入法、光标、选区、
@@ -331,20 +356,24 @@ impl PopupState {
         self.layout_edit();
     }
 
-    /// 搜索框位置：置于顶部条内，留出左右内边距。
+    /// 搜索框位置：紧跟在"搜索"标签之后，横跨到右边距。
+    ///
+    /// 输入框刻意**不带边框、不带底色**：整个顶部只有一行文字和它下面的一条实线，
+    /// 看起来像在纸上写的一行字，而不是一个灰色输入框（后者是"控制面板"的味道）。
     fn layout_edit(&self) {
         if self.edit.is_null() {
             return;
         }
         let m = &self.metrics;
-        let line = m.fs_preview + 8;
-        let top = (m.search_h - line) / 2;
+        let line = m.fs_preview + m.gap;
+        let top = (m.header_h - line) / 2;
+        let left = m.pad + m.mark;
         unsafe {
             MoveWindow(
                 self.edit,
-                m.pad + 4,
+                left,
                 top,
-                (m.width - 2 * m.pad - 8).max(10),
+                (m.width - m.pad - left).max(10),
                 line,
                 1,
             )
@@ -441,34 +470,82 @@ impl PopupState {
         gdi::fill(dc, &paper, color::PAPER);
 
         self.render_header(dc, w);
-        self.render_list(dc, w);
+        self.render_list(dc, w, h);
         self.render_footer(dc, w, h);
-        // 外框：WS_POPUP 没有非客户区，靠这一圈发丝线跟桌面分开
-        gdi::frame(dc, &paper, color::RULE_STRONG);
+
+        // 外框：WS_POPUP 没有非客户区，全靠这一圈发丝线跟桌面分开。
+        // 有 DWM 圆角时按同样半径画圆角框，否则直角的 1px 线会从圆角窗口的四角探出来。
+        if self.rounded {
+            let r = (self.metrics.dpi as i32 / 12).max(6);
+            gdi::round_frame(dc, &rect(0, 0, w - 1, h - 1), color::RULE_STRONG, r);
+        } else {
+            gdi::frame(dc, &paper, color::RULE_STRONG);
+        }
     }
 
+    /// 顶部：一个等宽的字段名 + 一行输入 + 一条实线。
+    ///
+    /// 没有输入框边框、没有浅灰底色 —— 那会让顶部看起来像"控制面板"。
+    /// 这里要的是"在纸上写一行字"，所以只有文字和它下面的那条地面线。
     fn render_header(&self, dc: HDC, w: i32) {
         let m = self.metrics;
-        let header = rect(1, 1, w - 1, m.search_h);
-        gdi::fill(dc, &header, color::WELL);
-        gdi::hline(dc, 1, w - 1, m.search_h - 1, color::RULE);
+        let label_rc = rect(m.pad, 1, m.pad + m.mark, m.header_h - 2);
+        gdi::text(dc, self.fonts.badge, color::INK3, &label_rc, "搜索", false);
+        // 预览模式：子窗口（EDIT）不参与离屏渲染，这里代画输入框内容 ——
+        // 空字符串就画一根光标，让预览图能表达"这里可以打字"。
+        if let Some(text) = &self.preview_text {
+            let input_left = m.pad + m.mark;
+            if text.is_empty() {
+                let caret_h = (m.fs_preview + 4).min(m.header_h - 10);
+                let y = (m.header_h - caret_h) / 2;
+                gdi::fill(
+                    dc,
+                    &rect(input_left, y, input_left + 1, y + caret_h),
+                    color::INK,
+                );
+            } else {
+                let input_rc = rect(input_left, 1, w - m.pad, m.header_h - 2);
+                gdi::text(dc, self.fonts.ui, color::INK, &input_rc, text, false);
+            }
+        }
+        // 字段的"地面"线：贯穿整个宽度，让顶部像一条真实的横栏。
+        gdi::hline(dc, 0, w, m.header_h - 1, color::RULE_STRONG);
     }
 
-    fn render_list(&mut self, dc: HDC, w: i32) {
+    /// 元信息行：类型补充 · 来源进程 · 使用次数。
+    fn meta_text(&self, row: &ItemRow) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        match row.kind {
+            Kind::Files if row.file_count > 0 => parts.push(format!("{} 个文件", row.file_count)),
+            Kind::Image if row.img_w > 0 && row.img_h > 0 => {
+                parts.push(format!("{} × {}", row.img_w, row.img_h))
+            }
+            _ => {}
+        }
+        if let Some(src) = &row.source_exe {
+            parts.push(src.clone());
+        }
+        if row.use_count > 0 {
+            parts.push(format!("用过 {} 次", row.use_count + 1));
+        }
+        if parts.is_empty() {
+            "文本".to_string()
+        } else {
+            parts.join(" · ")
+        }
+    }
+
+    fn render_list(&mut self, dc: HDC, w: i32, h: i32) {
         let m = self.metrics;
         if self.rows.is_empty() {
-            let msg = if self.query.is_empty() {
-                "还没有历史记录"
-            } else {
-                "没有匹配的记录"
-            };
-            let area = rect(0, m.search_h, w, m.search_h + m.list_height());
-            gdi::text(dc, self.fonts.meta, color::INK3, &area, msg, true);
+            self.render_empty(dc, w, h);
             return;
         }
 
         let (start, end) = self.nav.range(&m);
         let now = crate::core::store::now_ms();
+        let text_left = m.text_left();
+        let text_right = m.text_right();
 
         for idx in start..end {
             let row = self.rows[idx].clone();
@@ -480,8 +557,6 @@ impl PopupState {
                 gdi::fill(dc, &rc, color::SEL_BG);
             } else if hovered {
                 gdi::fill(dc, &rc, color::HOVER);
-            } else if idx + 1 < end {
-                gdi::hline(dc, m.pad, w - m.pad, rc.bottom - 1, color::RULE);
             }
 
             let fg = if selected { color::SEL_FG } else { color::INK };
@@ -495,115 +570,132 @@ impl PopupState {
             } else {
                 color::INK3
             };
-
-            // 左侧方块：图片用它画缩略图，文本/文件画类型徽标
-            let thumb_top = rc.top + (m.row_h - m.thumb) / 2;
-            let box_rc = rect(m.pad, thumb_top, m.pad + m.thumb, thumb_top + m.thumb);
-            let badge_bg = if selected {
+            let mark_color = if selected {
                 color::SEL_FG2
             } else {
-                color::BADGE_BG
-            };
-            let badge_fg = if selected {
-                color::SEL_BG
-            } else {
-                color::BADGE_FG
+                color::INK3
             };
 
-            if row.kind == Kind::Image && self.thumbs.contains(row.id) {
-                self.thumbs.draw(dc, row.id, &box_rc);
-            } else {
-                gdi::round_fill(dc, &box_rc, badge_bg, m.radius);
-                let label = match row.kind {
-                    Kind::Text => "文本",
-                    Kind::Files => "文件",
-                    Kind::Image => "图片",
-                };
-                gdi::text(dc, self.fonts.badge, badge_fg, &box_rc, label, true);
-                if row.kind == Kind::Image && !self.requested_thumbs.contains(&row.id) {
-                    // 懒加载：只对真正显示出来的图片行要缩略图。
-                    self.requested_thumbs.insert(row.id);
-                    unsafe { PostMessageW(self.owner, WM_POPUP_NEED_THUMB, 0, row.id as isize) };
-                }
+            // 置顶：外边距里一道短墨条，像夹在书页里的书签 —— 不占正文空间，
+            // 也不会和缩略图抢位置。反相时翻成纸色，保证选中行上仍然可见。
+            if row.pinned {
+                let bar_w = (m.dpi as i32 / 30).max(4);
+                let inset = (m.row_h / 4).max(8);
+                // 放在 x=4：贴着窗沿会像滚动条碎块；比文件夹轮廓粗一档，
+                // 两者就不会在同一个边距里互相干扰。
+                let x = (m.pad / 4).max(4);
+                gdi::fill(
+                    dc,
+                    &rect(x, rc.top + inset, x + bar_w, rc.bottom - inset),
+                    if selected { color::SEL_FG } else { color::INK },
+                );
             }
 
-            // 文本区
-            let text_left = m.pad + m.thumb + m.gap;
-            let pin_w = m.gap * 2 + 6;
-            let text_right = w - m.pad - pin_w;
+            // 左侧标记区：图片=缩略图，文件=文件夹轮廓，文本=**留空**。
+            // 文本行空着是刻意的：十行里八个"文本"方块只是噪声，眼睛要先把它们滤掉。
+            let mark_top = rc.top + (m.row_h - m.mark) / 2;
+            let mark_rc = rect(m.pad, mark_top, m.pad + m.mark, mark_top + m.mark);
+            match row.kind {
+                Kind::Image => {
+                    if self.thumbs.contains(row.id) {
+                        self.thumbs.draw(dc, row.id, &mark_rc);
+                    } else {
+                        // 缩略图还没到：先画一个空框占位，并懒加载请求一张。
+                        gdi::frame(dc, &mark_rc, mark_color);
+                        if !self.requested_thumbs.contains(&row.id) {
+                            self.requested_thumbs.insert(row.id);
+                            unsafe {
+                                PostMessageW(self.owner, WM_POPUP_NEED_THUMB, 0, row.id as isize)
+                            };
+                        }
+                    }
+                }
+                Kind::Files => draw_folder(dc, &mark_rc, mark_color),
+                Kind::Text => {}
+            }
+
+            // 第一行：预览 + 右对齐的等宽时间（时间列因此形成一条干净的竖线）
             let line_h = gdi::text_height(dc, self.fonts.ui).max(m.fs_preview);
             let meta_h = gdi::text_height(dc, self.fonts.meta).max(m.fs_meta);
-            let content_h = line_h + meta_h + 2;
+            let content_h = line_h + 4 + meta_h;
             let top = rc.top + (m.row_h - content_h) / 2;
 
-            let preview_rc = rect(text_left, top, text_right, top + line_h);
+            let time = timefmt::relative_short(now, row.last_used_at);
+            let time_w = gdi::text_width(dc, self.fonts.mono, &time);
+            let time_rc = rect(text_right - time_w, top, text_right, top + line_h);
+            let preview_right = (text_right - time_w - m.gap).max(text_left + m.gap);
+            let preview_rc = rect(text_left, top, preview_right, top + line_h);
             gdi::text(dc, self.fonts.ui, fg, &preview_rc, &row.preview, false);
+            gdi::text(dc, self.fonts.mono, fg3, &time_rc, &time, false);
 
-            // 元信息：类型补充 · 来源进程 · 相对时间
-            let mut parts: Vec<String> = Vec::new();
-            match row.kind {
-                Kind::Files if row.file_count > 0 => {
-                    parts.push(format!("{} 个文件", row.file_count))
-                }
-                Kind::Image if row.img_w > 0 && row.img_h > 0 => {
-                    parts.push(format!("{}×{}", row.img_w, row.img_h))
-                }
-                _ => {}
-            }
-            if let Some(src) = &row.source_exe {
-                parts.push(src.clone());
-            }
-            parts.push(timefmt::relative(now, row.last_used_at));
-
+            // 第二行：元信息
+            let meta = self.meta_text(&row);
             let meta_rc = rect(
                 text_left,
-                top + line_h + 2,
+                top + line_h + 4,
                 text_right,
-                top + line_h + 2 + meta_h,
+                top + line_h + 4 + meta_h,
             );
-            gdi::text(
-                dc,
-                self.fonts.meta,
-                fg2,
-                &meta_rc,
-                &parts.join(" · "),
-                false,
-            );
+            gdi::text(dc, self.fonts.meta, fg2, &meta_rc, &meta, false);
 
-            // 右侧：使用次数（等宽，便于竖着对齐）
-            if row.use_count > 1 {
-                let s = format!("×{}", row.use_count + 1);
-                let wd = gdi::text_width(dc, self.fonts.mono, &s);
-                let trc = rect(text_right - wd, rc.top, text_right, rc.bottom);
-                gdi::text(dc, self.fonts.mono, fg3, &trc, &s, false);
-            }
-
-            // 置顶标记
-            if row.pinned {
-                let cx = w - m.pad - 4;
-                let cy = rc.top + m.row_h / 2;
-                let r = (m.dpi as i32 / 48).max(2);
-                gdi::dot(
-                    dc,
-                    cx,
-                    cy,
-                    r,
-                    if selected { color::SEL_FG } else { color::PIN },
-                );
+            // 行分隔：从外边距到外边距的发丝线（选中行不需要，它自己有墨块分隔）
+            if !selected && idx + 1 < end {
+                gdi::hline(dc, m.pad, w - m.pad, rc.bottom - 1, color::RULE);
             }
         }
 
-        self.render_scrollbar(dc, w);
+        self.render_scrollbar(dc, w, h);
     }
 
-    fn render_scrollbar(&self, dc: HDC, w: i32) {
+    /// 空态：一句主句 + 一句等宽说明。空屏幕是"邀请你去用它"，不是一个死胡同。
+    ///
+    /// 注意：居中必须用**当前窗口高度**（`h`），不能用 `Metrics::list_height()`
+    /// —— 后者是"窗口拉到最大时"的列表高度，窗口按内容自适应时会把文字推到窗口外
+    /// （这个 bug 正是靠离屏预览图发现的）。
+    fn render_empty(&self, dc: HDC, w: i32, h: i32) {
+        let m = self.metrics;
+        let area = rect(m.pad, m.header_h, w - m.pad, h - m.footer_h);
+        let (title, hint) = if self.query.is_empty() {
+            ("还没有历史记录", "复制任意内容后就会出现在这里")
+        } else {
+            ("没有匹配的记录", "换个关键字试试")
+        };
+        let h1 = gdi::text_height(dc, self.fonts.ui).max(m.fs_preview);
+        let h2 = gdi::text_height(dc, self.fonts.badge).max(m.fs_label);
+        let total = h1 + m.gap + h2;
+        let top = area.top + (area.bottom - area.top - total) / 2;
+        gdi::text(
+            dc,
+            self.fonts.ui,
+            color::INK2,
+            &rect(area.left, top, area.right, top + h1),
+            title,
+            true,
+        );
+        gdi::text(
+            dc,
+            self.fonts.badge,
+            color::INK3,
+            &rect(
+                area.left,
+                top + h1 + m.gap,
+                area.right,
+                top + h1 + m.gap + h2,
+            ),
+            hint,
+            true,
+        );
+    }
+
+    fn render_scrollbar(&self, dc: HDC, w: i32, h: i32) {
         let m = self.metrics;
         let vis = self.nav.visible(&m);
         if self.rows.len() <= vis {
             return;
         }
-        let list_top = m.search_h + 2;
-        let list_h = m.list_height() - 4;
+        let list_top = m.header_h + 2;
+        // 同样用真实窗口高度，而不是"最大高度"。
+        let list_h = (h - m.footer_h - m.header_h - 4).max(8);
         let track_x = w - m.pad / 2 - m.scrollbar_w;
         gdi::fill(
             dc,
@@ -626,24 +718,63 @@ impl PopupState {
         );
     }
 
+    /// 页脚：左侧按键提示、右侧条目计数，都用等宽小字（安静，但需要时能读到）。
     fn render_footer(&self, dc: HDC, w: i32, h: i32) {
         let m = self.metrics;
         let top = h - m.footer_h;
-        if top <= m.search_h {
+        if top <= m.header_h {
             return;
         }
-        gdi::hline(dc, 1, w - 1, top, color::RULE);
-        let hint = "↑↓ 选择 · Enter 粘贴 · Shift+Enter 仅复制 · Ctrl+P 置顶 · Esc 关闭";
-        let status = self
+        gdi::hline(dc, 0, w, top, color::RULE);
+        // 提示语用界面字体（中文混排更整齐），计数用等宽（数字对齐）。
+        let hint = "↑↓ 选择    Enter 粘贴    Shift+Enter 仅复制    Esc 关闭";
+        let count = self
             .status
             .clone()
-            .unwrap_or_else(|| format!("共 {} 条", self.rows.len()));
-        let sw = gdi::text_width(dc, self.fonts.mono, &status);
-        let hint_rc = rect(m.pad, top, w - m.pad - sw - m.gap, h);
+            .unwrap_or_else(|| format!("{} 条", self.rows.len()));
+        let cw = gdi::text_width(dc, self.fonts.badge, &count);
+        let hint_rc = rect(m.pad, top, (w - m.pad - cw - m.gap).max(m.pad + 40), h);
         gdi::text(dc, self.fonts.meta, color::INK3, &hint_rc, hint, false);
-        let s_rc = rect(w - m.pad - sw, top, w - m.pad, h);
-        gdi::text(dc, self.fonts.mono, color::INK3, &s_rc, &status, false);
+        let c_rc = rect(w - m.pad - cw, top, w - m.pad, h);
+        gdi::text(dc, self.fonts.badge, color::INK3, &c_rc, &count, false);
     }
+}
+
+/// Win11 起 DWM 支持窗口圆角；失败（Win10）就返回 false，退回直角边框。
+fn apply_rounded_corners(hwnd: HWND) -> bool {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
+    };
+    const DWMWCP_ROUND: i32 = 2;
+    let pref: i32 = DWMWCP_ROUND;
+    let hr = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &pref as *const i32 as *const core::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        )
+    };
+    hr == 0
+}
+
+/// 文件夹轮廓：形状比文字标签更快被认出来，而且不占版面。
+fn draw_folder(dc: HDC, box_rc: &RECT, color: windows_sys::Win32::Foundation::COLORREF) {
+    let w = box_rc.right - box_rc.left;
+    let h = box_rc.bottom - box_rc.top;
+    let left = box_rc.left + w / 8;
+    let right = box_rc.right - w / 8;
+    let tab_top = box_rc.top + h / 6;
+    let tab_bottom = tab_top + (h / 6).max(3);
+    let bottom = box_rc.bottom - h / 6;
+    // 左上角的标签突起
+    gdi::frame(
+        dc,
+        &rect(left, tab_top, left + (w * 5) / 12, tab_bottom + 1),
+        color,
+    );
+    // 主体
+    gdi::frame(dc, &rect(left, tab_bottom, right, bottom), color);
 }
 
 // ------------------------------------------------------------- 窗口过程
@@ -652,7 +783,7 @@ pub fn register_class(hinstance: HINSTANCE) -> bool {
     let cls = to_wide(CLASS_NAME);
     let mut wc: WNDCLASSEXW = unsafe { zeroed() };
     wc.cbSize = std::mem::size_of::<WNDCLASSEXW>() as u32;
-    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
     wc.lpfnWndProc = Some(wnd_proc);
     wc.hInstance = hinstance;
     wc.hCursor = unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) };
@@ -825,7 +956,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_CREATE => {
             if let Some(st) = state(hwnd) {
-                st.well_brush = CreateSolidBrush(color::WELL);
+                st.rounded = apply_rounded_corners(hwnd);
                 st.create_edit();
             }
             return 0;
@@ -841,11 +972,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
                     0,
                 );
-                let st = Box::from_raw(p);
-                if !st.well_brush.is_null() {
-                    DeleteObject(st.well_brush as windows_sys::Win32::Graphics::Gdi::HGDIOBJ);
-                }
-                drop(st);
+                drop(Box::from_raw(p));
             }
             return 0;
         }
@@ -860,27 +987,29 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_ERASEBKGND => return 1, // 双缓冲自己负责，禁止系统擦背景（防闪）
         WM_CTLCOLOREDIT => {
-            if let Some(st) = state(hwnd) {
-                // 搜索框融进顶部条：底色用 WELL，与周围一致。
-                windows_sys::Win32::Graphics::Gdi::SetTextColor(wp as HDC, color::INK);
-                windows_sys::Win32::Graphics::Gdi::SetBkColor(wp as HDC, color::WELL);
-                if !st.well_brush.is_null() {
-                    return st.well_brush as isize;
-                }
-            }
+            // 输入框与纸面同色：顶部只有一行字和一条下划线，没有"输入框"这个物体。
+            windows_sys::Win32::Graphics::Gdi::SetTextColor(wp as HDC, color::INK);
+            windows_sys::Win32::Graphics::Gdi::SetBkColor(wp as HDC, color::PAPER);
             return unsafe { windows_sys::Win32::Graphics::Gdi::GetStockObject(WHITE_BRUSH) }
                 as isize;
         }
         WM_COMMAND => {
             let id = wp & 0xFFFF;
             let code = (wp >> 16) & 0xFFFF;
-            if id == EDIT_ID && code == EN_CHANGE {
-                if let Some(st) = state(hwnd) {
-                    let q = read_edit_text(st.edit);
-                    if q != st.query {
-                        st.query = q;
-                        PostMessageW(st.owner, WM_POPUP_QUERY, 0, 0);
-                    }
+            if id != EDIT_ID || code != EN_CHANGE {
+                return 0;
+            }
+            use std::sync::atomic::Ordering;
+            // 我们自己在改文本（呼出时清空搜索框）触发的通知要忽略。
+            // 这个标记是静态的，所以不用担心在 &mut 借用期间回读状态。
+            if SUPPRESS_EN_CHANGE.load(Ordering::SeqCst) {
+                return 0;
+            }
+            if let Some(st) = state(hwnd) {
+                let text = read_edit_text(st.edit);
+                if text != st.query {
+                    st.query = text;
+                    PostMessageW(st.owner, WM_POPUP_QUERY, 0, 0);
                 }
             }
             return 0;
@@ -1023,10 +1152,7 @@ pub fn show(hwnd: HWND, rows: Vec<ItemRow>, status: Option<String>) {
         st.set_rows(rows);
         st.status = status;
         st.query.clear();
-        if !st.edit.is_null() {
-            let empty = to_wide("");
-            unsafe { SetWindowTextW(st.edit, empty.as_ptr()) };
-        }
+        st.set_edit_text("");
         st.place();
         unsafe {
             ShowWindow(hwnd, SW_SHOW);
@@ -1101,11 +1227,8 @@ pub fn invalidate(hwnd: HWND) {
 /// 清除搜索框（用于每次弹出时重置）。
 pub fn clear_query(hwnd: HWND) {
     if let Some(st) = unsafe { state(hwnd) } {
-        if !st.edit.is_null() {
-            let empty = to_wide("");
-            unsafe { SetWindowTextW(st.edit, empty.as_ptr()) };
-        }
         st.query.clear();
+        st.set_edit_text("");
     }
 }
 
@@ -1129,6 +1252,37 @@ pub fn destroy(hwnd: HWND) {
     if !hwnd.is_null() {
         unsafe { DestroyWindow(hwnd) };
     }
+}
+
+/// 开发者预览：把弹窗内容渲染成一张 RGBA 图（**不显示窗口**，也不需要剪贴板）。
+///
+/// 存在的理由：改完视觉总得能看见结果。这里渲染走的是正式绘制路径（同一个
+/// [`PopupState::render`]），所以截出来的就是用户会看到的画面 ——
+/// 而不是"另写一套预览代码"那种自欺的假截图。
+pub fn render_preview(
+    hwnd: HWND,
+    rows: Vec<ItemRow>,
+    status: Option<String>,
+    query: &str,
+    thumbs: &[(i64, Vec<u8>)],
+    w: i32,
+    h: i32,
+) -> Option<Vec<u8>> {
+    let st = unsafe { state(hwnd) }?;
+    for (id, png) in thumbs {
+        st.thumbs.get_or_insert(*id, png);
+    }
+    st.set_rows(rows);
+    st.status = status;
+    st.query = query.to_string();
+    st.preview_text = Some(query.to_string());
+    // 选中第 2 行、悬停第 3 行：一张图里就能同时看到反相选中与 hover 两种状态。
+    st.nav.select(&st.metrics, 1);
+    st.hover = Some(2);
+
+    let mut mem = MemDc::new(w, h)?;
+    st.render(mem.dc(), w, h);
+    mem.to_rgba()
 }
 
 // ----------------------------------------------------------------- 工具
@@ -1245,13 +1399,13 @@ mod tests {
     fn hit_test_maps_y_to_row() {
         let m = m();
         assert_eq!(row_at(&m, 0, 0), None, "搜索框区域不算列表");
-        assert_eq!(row_at(&m, 0, m.search_h), Some(0));
-        assert_eq!(row_at(&m, 0, m.search_h + m.row_h - 1), Some(0));
-        assert_eq!(row_at(&m, 0, m.search_h + m.row_h), Some(1));
+        assert_eq!(row_at(&m, 0, m.header_h), Some(0));
+        assert_eq!(row_at(&m, 0, m.header_h + m.row_h - 1), Some(0));
+        assert_eq!(row_at(&m, 0, m.header_h + m.row_h), Some(1));
         // 滚了 5 行后，点第一行应该是第 5 条
-        assert_eq!(row_at(&m, 5, m.search_h + 1), Some(5));
+        assert_eq!(row_at(&m, 5, m.header_h + 1), Some(5));
         // 页脚区域不算
-        let footer_y = m.search_h + m.list_height() + 1;
+        let footer_y = m.header_h + m.list_height() + 1;
         assert_eq!(row_at(&m, 0, footer_y), None);
     }
 
@@ -1260,7 +1414,7 @@ mod tests {
         let m = m();
         let r0 = row_rect(&m, 0, 0);
         let r1 = row_rect(&m, 0, 1);
-        assert_eq!(r0.top, m.search_h);
+        assert_eq!(r0.top, m.header_h);
         assert_eq!(r0.bottom, r1.top, "行之间不能有缝");
         assert_eq!(r1.bottom - r1.top, m.row_h);
     }

@@ -10,7 +10,13 @@
 | 单元测试 | `cargo test` | 124 个用例：纯逻辑与纯编解码 | 无（只要文件系统） |
 | 存储/编解码自检 | `ClipHist.exe --selftest` | 21 项：建库、去重、文件条目、图片、搜索、保留策略、设置持久化 | 无 |
 | 剪贴板自检 | `ClipHist.exe --selftest-clipboard` | 6 项：真调 `OpenClipboard` / `SetClipboardData` 的文本、`CF_HDROP`、`CF_DIBV5`、注册 PNG、忽略标记 | 交互式桌面会话 |
+| 界面渲染预览 | `ClipHist.exe --render-preview out.png` / `--render-settings out.png` | 用**正式绘制代码**把弹窗/设置窗口渲成 PNG，可加 `--preview-empty`、`--preview-query` | 无 |
 | 内存实测 | `pwsh -File scripts\measure-memory.ps1` | 空库 / 预填 500 条 / 剪贴板 soak 三段采样与判定 | 第二部分需要 exe，第三部分需要剪贴板 |
+
+界面预览这一层是本项目"看得见"的基础：原生 GUI 没法靠浏览器迭代，
+而 `--render-preview` 渲的就是同一份 `render()`，所以截图即真实画面。
+它已经抓到过一个真 bug：空态文字居中时用了"最大高度"而不是当前窗口高度，
+结果 160px 高的空窗口里文字被推到窗口外（见 `ui/popup.rs` 的 `render_empty` 注释）。
 
 ## 2. 单元测试分布（124 个）
 

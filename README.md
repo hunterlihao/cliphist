@@ -7,6 +7,18 @@ Windows 便携版剪贴板历史工具：记录**文本 / 文件 / 图片**，�
 不引入 WebView、不引入 GUI 框架、不引入 comctl32 —— 因为需求里写死了"运行内存占用越低越好"，
 而这几样东西每一个都要几十 MB 的代价。
 
+## 界面
+
+![历史列表](docs/images/popup.png)
+
+方向是**索引页**：安静的左边距、一种强排版语气、等宽右对齐的时间列，
+每行不再重复"文本/文件/图片"的灰色方块（十行里八个一样，只是噪声）。
+选中用反相表达；图片行的边距里是缩略图，文件行是一个文件夹轮廓，文本行留白。
+设计取舍的完整说明见 [docs/design.md](docs/design.md)，设置窗口见
+[settings.png](docs/images/settings.png)。
+
+启动后是纯 GUI 子系统进程：**不会出现任何控制台窗口**（`--selftest` 等命令行模式除外）。
+
 ## 实测数据（本机 release 构建，`scripts\measure-memory.ps1`）
 
 | 场景 | 私有提交内存 | 工作集 | 线程 | 句柄 |
@@ -95,6 +107,11 @@ cargo test                                  # 124 个单元测试
 .\dist-portable\ClipHist.exe --selftest     # 存储与图片编解码自检（21 项）
 .\dist-portable\ClipHist.exe --selftest-clipboard   # 剪贴板读写自检（需桌面会话）
 pwsh -File scripts\measure-memory.ps1       # 内存实测（三段采样 + 判定）
+
+# 视觉回归：用正式绘制代码把界面渲染成 PNG（不显示窗口、不碰剪贴板/数据库）
+.\dist-portable\ClipHist.exe --render-preview out.png
+.\dist-portable\ClipHist.exe --render-preview empty.png --preview-empty
+.\dist-portable\ClipHist.exe --render-settings settings.png
 ```
 
 ## 已知限制

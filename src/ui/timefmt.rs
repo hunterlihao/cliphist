@@ -74,6 +74,29 @@ pub fn local_date_short(unix_ms: i64, now_ms: i64) -> String {
     }
 }
 
+/// 紧凑相对时间：`刚刚` / `3 分` / `2 时` / `昨天` / `5 天` / `10月14日`。
+///
+/// 列表右侧那一列时间用这个：等宽 + 短，才能竖着对齐成一条干净的线。
+pub fn relative_short(now_ms: i64, then_ms: i64) -> String {
+    let d = now_ms - then_ms;
+    if d < MINUTE {
+        return "刚刚".to_string();
+    }
+    if d < HOUR {
+        return format!("{} 分", d / MINUTE);
+    }
+    if d < DAY {
+        return format!("{} 时", d / HOUR);
+    }
+    if d < 2 * DAY {
+        return "昨天".to_string();
+    }
+    if d < 30 * DAY {
+        return format!("{} 天", d / DAY);
+    }
+    local_date_short(then_ms, now_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
