@@ -24,11 +24,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, MoveWindow, PostMessageW, RegisterClassExW, SendMessageW, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CS_DBLCLKS,
     CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_LEFT, HTCAPTION, HTCLIENT,
-    HWND_TOPMOST, IDC_ARROW, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_ACTIVATE, WM_APP, WM_CHAR,
-    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCHITTEST,
-    WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WM_SYSKEYDOWN, WNDCLASSEXW, WNDPROC, WS_CHILD,
-    WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    HWND_TOPMOST, IDC_ARROW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_ACTIVATE, WM_APP,
+    WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_DESTROY, WM_ERASEBKGND,
+    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
+    WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WM_SYSKEYDOWN, WNDCLASSEXW, WNDPROC,
+    WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::core::model::{ItemRow, Kind};
@@ -324,6 +324,9 @@ struct PopupState {
     /// DWM 是否给了圆角（Win11）。给了就画圆角边框，否则画直角边框，
     /// 免得那条 1px 边框从圆角窗口的四个角里探出来。
     rounded: bool,
+    /// 呼出时定下的锚点：(x, 固定边 y, 是否朝上翻)。之后行数变化只改高度，
+    /// 位置纹丝不动 —— 打字时弹窗会跑，比丑难受得多。
+    anchor: Option<(i32, i32, bool)>,
     /// 仅预览模式用：离屏渲染不包含子窗口（EDIT），所以由父窗口代画输入框内容
     /// （空字符串表示"空输入框"，会画一根光标），这样预览图才跟用户看到的一致。
     preview_text: Option<String>,
@@ -357,6 +360,7 @@ impl PopupState {
             status: None,
             query: String::new(),
             rounded: false,
+            anchor: None,
             preview_text: None,
         }
     }
@@ -496,14 +500,44 @@ impl PopupState {
             work.left + gap,
             (work.right - m.width - gap).max(work.left + gap),
         );
+        let mut flipped = false;
         let mut y = pt.y + gap;
         if y + h > work.bottom - gap {
             // 下方放不下就翻到光标上方
             y = pt.y - h - gap;
+            flipped = true;
         }
         y = y.clamp(work.top + gap, (work.bottom - h - gap).max(work.top + gap));
 
+        // 记住这次定下的位置：朝上翻时固定底边，否则固定顶边。
+        self.anchor = Some((x, if flipped { y + h } else { y }, flipped));
         unsafe { SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, m.width, h, SWP_SHOWWINDOW) };
+    }
+
+    /// 内容变化（搜索过滤）时**只改高度、不动位置**。
+    ///
+    /// 早先每次过滤都重新 `place()`：重新读一次光标、重新决定朝上还是朝下，
+    /// 结果就是打字时弹窗在屏幕上跳来跳去。现在锚点在呼出时定一次，之后只升降高度。
+    fn keep_anchor(&mut self) {
+        let m = self.metrics;
+        if let Some((x, edge_y, flipped)) = self.anchor {
+            let h = m.height_for(self.rows.len());
+            let y = if flipped { edge_y - h } else { edge_y };
+            unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    HWND_TOPMOST,
+                    x,
+                    y,
+                    m.width,
+                    h,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                )
+            };
+            return;
+        }
+        // 第一次（还没定过位）就正常定位。
+        self.place();
     }
 
     // ---------------------------------------------------------- 绘制
@@ -1347,6 +1381,7 @@ pub fn show(hwnd: HWND, rows: Vec<ItemRow>, status: Option<String>) {
         st.set_rows(rows);
         st.status = status;
         st.query.clear();
+        st.anchor = None; // 每次呼出都重新按光标定一次位
         st.set_edit_text("");
         st.place();
         unsafe {
@@ -1385,7 +1420,7 @@ pub fn set_rows(hwnd: HWND, rows: Vec<ItemRow>) {
                 st.nav.select(&st.metrics, idx);
             }
         }
-        st.place();
+        st.keep_anchor();
         invalidate(hwnd);
     }
 }
@@ -1423,6 +1458,7 @@ pub fn invalidate(hwnd: HWND) {
 pub fn clear_query(hwnd: HWND) {
     if let Some(st) = unsafe { state(hwnd) } {
         st.query.clear();
+        st.anchor = None; // 每次呼出都重新按光标定一次位
         st.set_edit_text("");
     }
 }
