@@ -142,6 +142,66 @@ impl Default for SearchPlan {
     }
 }
 
+/// 把查询切成"分词"：按空白（含全角空格）切分，转小写、去重、保持输入顺序。
+///
+/// 为什么要分词：用户输入 `vs code 配置` 时，期望的是"同时包含这三个词"，
+/// 而不是要求它们连在一起。SQLite 的 LIKE 只能逐词匹配，所以由我们拆好再拼成 AND。
+pub fn tokenize(query: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in query.split(|c: char| c.is_whitespace() || c == '\u{3000}') {
+        let t = part.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let low = t.to_lowercase();
+        if !out.contains(&low) {
+            out.push(low);
+        }
+    }
+    out
+}
+
+/// 所有分词在 `text` 里的命中区间（字节偏移，已排序并合并重叠）。
+///
+/// 只做展示用（给预览加下划线）；大小写不敏感，仅当小写转换不改变长度时启用，
+/// 避免土耳其语 ß/İ 这类字符导致偏移错位。
+pub fn highlight_ranges(text: &str, tokens: &[String]) -> Vec<(usize, usize)> {
+    let lower = text.to_lowercase();
+    let same_len = lower.len() == text.len();
+    let hay = if same_len { lower.as_str() } else { text };
+    let mut raw: Vec<(usize, usize)> = Vec::new();
+    for t in tokens {
+        if t.is_empty() {
+            continue;
+        }
+        let needle = if same_len {
+            t.to_lowercase()
+        } else {
+            t.clone()
+        };
+        let mut from = 0usize;
+        while from <= hay.len() {
+            match hay[from..].find(&needle) {
+                Some(pos) => {
+                    let s = from + pos;
+                    raw.push((s, s + needle.len()));
+                    from = s + needle.len().max(1);
+                }
+                None => break,
+            }
+        }
+    }
+    raw.sort();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in raw {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,64 +273,4 @@ mod tests {
         assert!(!matches("abc", "xyz"));
         assert!(matches("abc", "   "));
     }
-}
-
-/// 把查询切成"分词"：按空白（含全角空格）切分，转小写、去重、保持输入顺序。
-///
-/// 为什么要分词：用户输入 `vs code 配置` 时，期望的是"同时包含这三个词"，
-/// 而不是要求它们连在一起。SQLite 的 LIKE 只能逐词匹配，所以由我们拆好再拼成 AND。
-pub fn tokenize(query: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for part in query.split(|c: char| c.is_whitespace() || c == '\u{3000}') {
-        let t = part.trim();
-        if t.is_empty() {
-            continue;
-        }
-        let low = t.to_lowercase();
-        if !out.contains(&low) {
-            out.push(low);
-        }
-    }
-    out
-}
-
-/// 所有分词在 `text` 里的命中区间（字节偏移，已排序并合并重叠）。
-///
-/// 只做展示用（给预览加下划线）；大小写不敏感，仅当小写转换不改变长度时启用，
-/// 避免土耳其语 ß/İ 这类字符导致偏移错位。
-pub fn highlight_ranges(text: &str, tokens: &[String]) -> Vec<(usize, usize)> {
-    let lower = text.to_lowercase();
-    let same_len = lower.len() == text.len();
-    let hay = if same_len { lower.as_str() } else { text };
-    let mut raw: Vec<(usize, usize)> = Vec::new();
-    for t in tokens {
-        if t.is_empty() {
-            continue;
-        }
-        let needle = if same_len {
-            t.to_lowercase()
-        } else {
-            t.clone()
-        };
-        let mut from = 0usize;
-        while from <= hay.len() {
-            match hay[from..].find(&needle) {
-                Some(pos) => {
-                    let s = from + pos;
-                    raw.push((s, s + needle.len()));
-                    from = s + needle.len().max(1);
-                }
-                None => break,
-            }
-        }
-    }
-    raw.sort();
-    let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (s, e) in raw {
-        match merged.last_mut() {
-            Some(last) if s <= last.1 => last.1 = last.1.max(e),
-            _ => merged.push((s, e)),
-        }
-    }
-    merged
 }
