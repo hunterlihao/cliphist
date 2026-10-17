@@ -85,6 +85,8 @@ pwsh -File scripts\build.ps1
 | ↑ / ↓ | 选择 |
 | Enter | 粘贴到原窗口 |
 | Shift+Enter | 只放回剪贴板，不自动粘贴 |
+| Ctrl+Enter | 打开选中图片（交给系统看图程序） |
+| Ctrl+Shift+Enter | 把粘贴队列合并成一段多行文本复制走 |
 | Ctrl+1 ~ 9 | 直接粘贴第 N 条 |
 | Ctrl+P | 置顶 / 取消置顶（置顶＝常用，不会被自动清理） |
 | Ctrl+D | 删除选中条目 |

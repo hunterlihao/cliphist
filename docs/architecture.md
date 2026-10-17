@@ -125,7 +125,7 @@ item_files(item_id, ordinal, path, is_dir)   -- 文件条目，外键 ON DELETE 
 1. **弹窗的窗口过程不能被重入**。所以弹窗自己不弹菜单、不弹模态框 ——
    右键菜单交给控制器窗口去弹（`TrackPopupMenu` 会泵消息）。
    凡是会同步派发消息的动作（只有 `ShowWindow(SW_HIDE)`）都推迟到
-   `&mut PopupState` 借用结束之后执行（见 `ui/popup.rs` 的 `Outcome`/`dispatch`）。
+   `&mut PopupState` 借用结束之后执行（见 `ui/popup/mod.rs` 的 `Outcome`/`dispatch`）。
    控制器那边则用 `thread_local + try_borrow_mut`：重入时退化为 `DefWindowProcW`，
    既不 panic 也不产生别名 `&mut`。
 2. **`HWND` 是裸指针，不实现 `Send`**。写线程需要窗口句柄来投递"缩略图已生成"，
@@ -198,3 +198,17 @@ writer: upsert kind=Text → Inserted(1)
 | 搜索框用系统 EDIT 控件 | 中文输入法、光标、选区、右键菜单全部白送；自绘文本框要把这些重做一遍 |
 | 静态 CRT | 去掉 `vcruntime140.dll` 依赖，真正做到"拷走就能跑"；体积多一点 |
 | `journal_mode=DELETE` 而非 WAL | 保住"数据只在一个文件里"；牺牲一点写入吞吐（剪贴板场景完全够） |
+
+## 附：`ui/popup` 的四文件结构（0.2.x 重构）
+
+原先 `popup.rs` 一个文件 1825 行，命中测试、绘制、标题栏、消息过程混在一起，
+"设置按钮点不到""右键窗口消失"这类 bug 都藏在这个夹缝里。现在：
+
+| 文件 | 职责 |
+|---|---|
+| `popup/mod.rs` | 状态结构、定位计算、窗口类与消息过程、`Outcome`/`dispatch`、公开 API |
+| `popup/nav.rs` | 列表导航与命中测试（**不碰 HWND**，纯函数，可单测） |
+| `popup/view.rs` | 全部绘制：搜索行、列表行（含命中下划线、队列序号徽标）、空态、滚动条、页脚 |
+| `popup/chrome.rs` | 标题栏按钮命中 `title_hit` + DWM 圆角 |
+
+关键约束：**绘制与命中共用同一个 `title_hit`**；`nav` 层零 Win32 依赖。
