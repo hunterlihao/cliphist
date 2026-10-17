@@ -81,6 +81,8 @@ pub struct Layout {
     pub pad: i32,
     /// 值区的左边界（标签占左侧固定宽度）
     pub value_x: i32,
+    /// 数值行两端箭头的可点宽度
+    pub arrow_w: i32,
 }
 
 impl Layout {
@@ -93,6 +95,7 @@ impl Layout {
             footer_h: s(30),
             pad: s(16),
             value_x: s(196),
+            arrow_w: s(30),
         }
     }
 
@@ -119,6 +122,35 @@ pub fn row_at(l: &Layout, y: i32) -> Option<usize> {
 }
 
 /// 鼠标落在值区的哪一半（纯函数，可单测）。
+/// 数值行左右箭头的矩形（左减右加）。
+pub fn arrow_rects(l: &Layout, row_top: i32) -> (RECT, RECT) {
+    let left = rect(l.value_x, row_top, l.value_x + l.arrow_w, row_top + l.row_h);
+    let right = rect(
+        l.width - l.pad - l.arrow_w,
+        row_top,
+        l.width - l.pad,
+        row_top + l.row_h,
+    );
+    (left, right)
+}
+
+/// 点到了哪个箭头。
+///
+/// 早先是"按整行的左右两半"判断 —— 而箭头是画在值文本里的，位置和命中区对不上，
+/// 于是出现"点右边那个箭头有时反而变小"的怪现象。现在命中的就是**看得见的那个箭头**，
+/// 点值文本本身不做任何事。
+pub fn arrow_hit(l: &Layout, x: i32) -> Option<Half> {
+    let (left, right) = arrow_rects(l, 0);
+    if x >= left.left && x < left.right {
+        return Some(Half::Decrease);
+    }
+    if x >= right.left && x < right.right {
+        return Some(Half::Increase);
+    }
+    None
+}
+
+#[allow(dead_code)]
 pub fn half_at(l: &Layout, x: i32) -> Half {
     let mid = l.value_x + (l.width - l.pad - l.value_x) / 2;
     if x < mid {
@@ -198,21 +230,21 @@ impl SettingsState {
             }
             RowKind::MaxItems => {
                 if s.max_items == 0 {
-                    "不限 ◀▶".to_string()
+                    "不限".to_string()
                 } else {
-                    format!("◀ {} 条 ▶", s.max_items)
+                    format!("{} 条", s.max_items)
                 }
             }
             RowKind::KeepDays => {
                 if s.keep_days == 0 {
-                    "不限 ◀▶".to_string()
+                    "不限".to_string()
                 } else {
-                    format!("◀ {} 天 ▶", s.keep_days)
+                    format!("{} 天", s.keep_days)
                 }
             }
-            RowKind::MaxItemMb => format!("◀ {} MB ▶", s.max_item_bytes / (1024 * 1024)),
+            RowKind::MaxItemMb => format!("{} MB", s.max_item_bytes / (1024 * 1024)),
             RowKind::MaxImageMb => {
-                format!("◀ {} MB ▶", s.max_image_bytes / (1024 * 1024))
+                format!("{} MB", s.max_image_bytes / (1024 * 1024))
             }
             RowKind::PasteMode => match s.paste_mode {
                 PasteMode::AutoPaste => "自动粘贴".to_string(),
@@ -283,9 +315,12 @@ impl SettingsState {
             return ClickResult::Redraw;
         }
         if Self::is_numeric(kind) {
-            let half = half_at(&self.layout, x);
-            self.step(kind, half);
-            return ClickResult::Changed;
+            // 只有真的点在箭头矩形上才算调整；点值文本什么都不做。
+            if let Some(half) = arrow_hit(&self.layout, x) {
+                self.step(kind, half);
+                return ClickResult::Changed;
+            }
+            return ClickResult::None;
         }
         match kind {
             RowKind::Hotkey => {
@@ -439,7 +474,17 @@ impl SettingsState {
             } else {
                 self.fonts.ui
             };
-            gdi::text(dc, f, vcolor, &value, &self.value(*kind), false);
+            if Self::is_numeric(*kind) {
+                // 数值行：左右两个**明确的箭头按钮**，值在中间居中。
+                // 之前箭头是画在值文本里的，命中却按"整行左右两半"算，位置与可点区对不上。
+                let (lc, rc) = arrow_rects(&l, top);
+                gdi::text(dc, self.fonts.ui, color::INK3, &lc, "◀", true);
+                gdi::text(dc, self.fonts.ui, color::INK3, &rc, "▶", true);
+                let mid = rect(lc.right, top, rc.left, top + l.row_h);
+                gdi::text(dc, f, vcolor, &mid, &self.value(*kind), true);
+            } else {
+                gdi::text(dc, f, vcolor, &value, &self.value(*kind), false);
+            }
 
             if i + 1 < ROWS.len() {
                 gdi::hline(dc, l.pad, w - l.pad, row.bottom - 1, color::RULE);
@@ -803,6 +848,26 @@ mod tests {
     }
 
     #[test]
+    fn numeric_arrows_have_explicit_hit_areas() {
+        let l = Layout::new(96);
+        // 左箭头整块可点 → 减；右箭头整块可点 → 加
+        assert_eq!(arrow_hit(&l, l.value_x), Some(Half::Decrease));
+        assert_eq!(
+            arrow_hit(&l, l.value_x + l.arrow_w - 1),
+            Some(Half::Decrease)
+        );
+        assert_eq!(arrow_hit(&l, l.width - l.pad - 1), Some(Half::Increase));
+        assert_eq!(
+            arrow_hit(&l, l.width - l.pad - l.arrow_w),
+            Some(Half::Increase)
+        );
+        // 值文本本身（两个箭头之间）点了什么都不做 —— 这正是"点了一下却反向变化"的修正
+        let mid = (l.value_x + l.arrow_w + l.width - l.pad - l.arrow_w) / 2;
+        assert_eq!(arrow_hit(&l, mid), None);
+        assert_eq!(arrow_hit(&l, l.pad), None, "标签区不触发调整");
+    }
+
+    #[test]
     fn row_hit_test() {
         let l = l();
         assert_eq!(row_at(&l, 0), None, "标题栏不是行");
@@ -959,10 +1024,10 @@ mod tests {
             status: None,
         };
         assert_eq!(st.value(RowKind::Hotkey), "Alt+V");
-        assert_eq!(st.value(RowKind::MaxItems), "◀ 500 条 ▶");
-        assert_eq!(st.value(RowKind::KeepDays), "◀ 30 天 ▶");
-        assert_eq!(st.value(RowKind::MaxItemMb), "◀ 2 MB ▶");
-        assert_eq!(st.value(RowKind::MaxImageMb), "◀ 200 MB ▶");
+        assert_eq!(st.value(RowKind::MaxItems), "500 条");
+        assert_eq!(st.value(RowKind::KeepDays), "30 天");
+        assert_eq!(st.value(RowKind::MaxItemMb), "2 MB");
+        assert_eq!(st.value(RowKind::MaxImageMb), "200 MB");
         assert_eq!(st.value(RowKind::PasteMode), "自动粘贴");
         assert_eq!(st.value(RowKind::Autostart), "关");
         assert_eq!(st.value(RowKind::CaptureImages), "开");

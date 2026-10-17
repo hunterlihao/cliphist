@@ -358,6 +358,8 @@ struct App {
     tray_failed: bool,
     /// 上一次托盘单击的时间：用于去掉重复通知。
     last_tray_click: Option<std::time::Instant>,
+    /// 粘贴队列（有序条目 id）。只存在内存里：它是一次性动作，不该进库。
+    queue: Vec<i64>,
 }
 
 thread_local! {
@@ -428,6 +430,7 @@ impl App {
             hotkey_ok: false,
             tray_failed: false,
             last_tray_click: None,
+            queue: Vec::new(),
         };
         app.refresh_limits();
 
@@ -494,6 +497,9 @@ impl App {
     }
 
     fn popup_status(&self) -> Option<String> {
+        if !self.queue.is_empty() {
+            return Some(format!("队列 {} 条", self.queue.len()));
+        }
         if self.tray_failed {
             // 没有托盘就没有气泡提示，这行状态是唯一的告知途径。
             return Some("托盘不可用".to_string());
@@ -547,6 +553,49 @@ impl App {
         }
         self.last_tray_click = Some(now);
         self.toggle_main();
+    }
+
+    /// 加入/移出粘贴队列。顺序就是加入的先后，界面上显示①②③。
+    fn toggle_queue(&mut self, target: HWND, id: i64) {
+        if let Some(pos) = self.queue.iter().position(|q| *q == id) {
+            self.queue.remove(pos);
+        } else {
+            self.queue.push(id);
+        }
+        self.sync_queue(target);
+    }
+
+    /// 把队列推给列表窗口并刷新状态文字。
+    fn sync_queue(&mut self, target: HWND) {
+        for h in [self.popup, self.main_hwnd] {
+            if !h.is_null() {
+                popup::set_queue(h, self.queue.clone());
+            }
+        }
+        if !target.is_null() {
+            let status = self.popup_status();
+            popup::set_status(target, status);
+        }
+        // 先算好 tooltip，再取 &mut tray（否则同时借 self）。
+        let tip = self.tray_tooltip();
+        if let Some(tray) = &mut self.tray {
+            tray.set_tooltip(&tip);
+        }
+    }
+
+    /// 粘贴队列里的下一条（Ctrl+Alt+V）。
+    fn paste_next(&mut self) {
+        if self.queue.is_empty() {
+            self.balloon("队列是空的", "在列表里按空格把条目加入队列。", false);
+            return;
+        }
+        let id = self.queue.remove(0);
+        diag(format_args!(
+            "queue: 粘贴下一条 id={id} 剩余={}",
+            self.queue.len()
+        ));
+        self.choose(id, false);
+        self.sync_queue(std::ptr::null_mut());
     }
 
     fn toggle_main(&mut self) {
@@ -841,6 +890,7 @@ impl App {
         if hotkey_changed {
             let (mods, vk) = (self.settings.hotkey_mods, self.settings.hotkey_vk);
             hotkey::unregister(self.hwnd, hotkey::HOTKEY_SHOW);
+            hotkey::unregister(self.hwnd, hotkey::HOTKEY_QUEUE);
             if hotkey::register(self.hwnd, hotkey::HOTKEY_SHOW, mods, vk) {
                 self.hotkey_ok = true;
             } else {
@@ -1011,6 +1061,17 @@ pub fn init_runtime(hwnd: HWND, autostart: bool) {
             app.settings.hotkey_text(),
             app.hotkey_ok
         ));
+        // 队列热键：Ctrl+Alt+V，固定绑定（不占设置里的那一行）。
+        let queue_ok = hotkey::register(
+            hwnd,
+            hotkey::HOTKEY_QUEUE,
+            windows_sys::Win32::UI::Input::KeyboardAndMouse::MOD_CONTROL
+                | windows_sys::Win32::UI::Input::KeyboardAndMouse::MOD_ALT,
+            0x56,
+        );
+        diag(format_args!(
+            "init: RegisterHotKey(Ctrl+Alt+V) = {queue_ok}"
+        ));
         if !app.hotkey_ok {
             let text = app.settings.hotkey_text();
             app.balloon(
@@ -1131,6 +1192,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             return 0;
         }
         WM_HOTKEY => {
+            if wp as i32 == hotkey::HOTKEY_QUEUE {
+                APP.with(|c| {
+                    if let Ok(mut g) = c.try_borrow_mut() {
+                        if let Some(app) = g.as_mut() {
+                            app.paste_next();
+                        }
+                    }
+                });
+                return 0;
+            }
             if wp as i32 == hotkey::HOTKEY_SHOW {
                 APP.with(|c| {
                     if let Ok(mut g) = c.try_borrow_mut() {
@@ -1177,6 +1248,18 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 }),
                 _ => {}
             }
+            return 0;
+        }
+        popup::WM_POPUP_QUEUE => {
+            let id = lp as i64;
+            let target = wp as HWND;
+            APP.with(|c| {
+                if let Ok(mut g) = c.try_borrow_mut() {
+                    if let Some(app) = g.as_mut() {
+                        app.toggle_queue(target, id);
+                    }
+                }
+            });
             return 0;
         }
         popup::WM_LIST_OPEN_SETTINGS => {

@@ -215,23 +215,36 @@ impl PopupState {
             // 文本行空着是刻意的：十行里八个"文本"方块只是噪声，眼睛要先把它们滤掉。
             let mark_top = rc.top + (m.row_h - m.mark) / 2;
             let mark_rc = rect(m.pad, mark_top, m.pad + m.mark, mark_top + m.mark);
-            match row.kind {
-                Kind::Image => {
-                    if self.thumbs.contains(row.id) {
-                        self.thumbs.draw(dc, row.id, &mark_rc);
-                    } else {
-                        // 缩略图还没到：先画一个空框占位，并懒加载请求一张。
-                        gdi::frame(dc, &mark_rc, mark_color);
-                        if !self.requested_thumbs.contains(&row.id) {
-                            self.requested_thumbs.insert(row.id);
-                            unsafe {
-                                PostMessageW(self.owner, WM_POPUP_NEED_THUMB, 0, row.id as isize)
-                            };
+            // 队列优先：入队的行在标记区显示序号（①②③…），比缩略图更该被看见。
+            let queued = self.queue.iter().position(|id| *id == row.id);
+            if let Some(pos) = queued {
+                gdi::round_fill(dc, &mark_rc, color::INK, (m.dpi as i32) / 32);
+                let n = (pos + 1).to_string();
+                gdi::text(dc, self.fonts.mono, color::PAPER, &mark_rc, &n, true);
+            } else {
+                match row.kind {
+                    Kind::Image => {
+                        if self.thumbs.contains(row.id) {
+                            self.thumbs.draw(dc, row.id, &mark_rc);
+                        } else {
+                            // 缩略图还没到：先画一个空框占位，并懒加载请求一张。
+                            gdi::frame(dc, &mark_rc, mark_color);
+                            if !self.requested_thumbs.contains(&row.id) {
+                                self.requested_thumbs.insert(row.id);
+                                unsafe {
+                                    PostMessageW(
+                                        self.owner,
+                                        WM_POPUP_NEED_THUMB,
+                                        0,
+                                        row.id as isize,
+                                    )
+                                };
+                            }
                         }
                     }
+                    Kind::Files => draw_folder(dc, &mark_rc, mark_color),
+                    Kind::Text => {}
                 }
-                Kind::Files => draw_folder(dc, &mark_rc, mark_color),
-                Kind::Text => {}
             }
 
             // 第一行：预览 + 右对齐的等宽时间（时间列因此形成一条干净的竖线）
@@ -347,7 +360,7 @@ impl PopupState {
         }
         gdi::hline(dc, 0, w, top, color::RULE);
         // 提示语用界面字体（中文混排更整齐），计数用等宽（数字对齐）。
-        let hint = "↑↓ 选择    Enter 粘贴    Shift+Enter 仅复制    Esc 关闭";
+        let hint = "↑↓ 选择  Enter 粘贴  空格 入队  Ctrl+Alt+V 粘下一条  Esc 关闭";
         let count = self
             .status
             .clone()

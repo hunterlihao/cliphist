@@ -122,6 +122,8 @@ pub enum KeyAction {
         clipboard_only: bool,
     },
     Context,
+    /// 加入/移出粘贴队列
+    Queue,
     Pin,
     Delete,
     Close,
@@ -137,6 +139,7 @@ pub fn handle_key(
     shift: bool,
 ) -> (KeyAction, bool) {
     match vk {
+        VK_SPACE => (KeyAction::Queue, false),
         VK_ESCAPE => (KeyAction::Close, false),
         VK_RETURN => (
             KeyAction::Choose {

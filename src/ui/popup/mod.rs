@@ -96,10 +96,13 @@ pub const WM_POPUP_NEED_THUMB: u32 = WM_APP + 14;
 pub const WM_POPUP_PIN: u32 = WM_APP + 15;
 /// 弹窗 → 控制器：删除某条。
 pub const WM_POPUP_DELETE: u32 = WM_APP + 16;
+/// 列表 → 控制器：把这条加入/移出粘贴队列（wParam = 发送者）。
+pub const WM_POPUP_QUEUE: u32 = WM_APP + 21;
 
 const EN_CHANGE: usize = 0x0300;
 const VK_RETURN: usize = 0x0D;
 const VK_ESCAPE: usize = 0x1B;
+const VK_SPACE: usize = 0x20;
 const VK_UP: usize = 0x26;
 const VK_DOWN: usize = 0x28;
 const VK_PRIOR: usize = 0x21;
@@ -136,6 +139,8 @@ struct PopupState {
     /// 右键菜单打开期间置位：此时窗口失去激活是"菜单拿走了焦点"，
     /// 不是"用户点了别处"，绝不能因此关窗。
     menu_open: bool,
+    /// 粘贴队列（有序的条目 id），只存在内存里 —— 它是一次性动作，不该进库。
+    queue: Vec<i64>,
     /// 仅预览模式用：离屏渲染不包含子窗口（EDIT），所以由父窗口代画输入框内容
     /// （空字符串表示"空输入框"，会画一根光标），这样预览图才跟用户看到的一致。
     preview_text: Option<String>,
@@ -170,6 +175,7 @@ impl PopupState {
             query: String::new(),
             rounded: false,
             menu_open: false,
+            queue: Vec::new(),
             anchor: None,
             preview_text: None,
         }
@@ -444,6 +450,7 @@ enum Outcome {
     Close,
     Choose { id: i64, clipboard_only: bool },
     Context { id: i64 },
+    Queue { id: i64 },
     Pin { id: i64 },
     Delete { id: i64 },
 }
@@ -464,6 +471,11 @@ unsafe fn dispatch(hwnd: HWND, out: Outcome) {
             hide(hwnd);
             if !owner.is_null() {
                 PostMessageW(owner, WM_POPUP_CHOOSE, clipboard_only as usize, id as isize);
+            }
+        }
+        Outcome::Queue { id } => {
+            if !owner.is_null() {
+                PostMessageW(owner, WM_POPUP_QUEUE, hwnd as usize, id as isize);
             }
         }
         Outcome::Context { id } => {
@@ -499,6 +511,10 @@ fn outcome_for(st: &PopupState, action: KeyAction, repaint: bool) -> Outcome {
         KeyAction::Close => Outcome::Close,
         KeyAction::Choose { clipboard_only } => match id {
             Some(id) => Outcome::Choose { id, clipboard_only },
+            None => Outcome::None,
+        },
+        KeyAction::Queue => match id {
+            Some(id) => Outcome::Queue { id },
             None => Outcome::None,
         },
         KeyAction::Context => match id {
@@ -930,6 +946,14 @@ pub fn selected_id(hwnd: HWND) -> Option<i64> {
 pub fn invalidate(hwnd: HWND) {
     unsafe {
         windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 0);
+    }
+}
+
+/// 更新粘贴队列（有序条目 id）。控制器在队列变化后调用。
+pub fn set_queue(hwnd: HWND, ids: Vec<i64>) {
+    if let Some(st) = unsafe { state(hwnd) } {
+        st.queue = ids;
+        invalidate(hwnd);
     }
 }
 
