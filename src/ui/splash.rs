@@ -31,6 +31,9 @@ use crate::ui::theme::{color, Metrics};
 use crate::win::strings::to_wide;
 
 const CLASS_NAME: &str = "ClipHist.Splash";
+
+/// 动画播完 → 控制器（该把主窗口拿出来了）。
+pub const WM_SPLASH_DONE: u32 = 0x8000 + 18;
 /// 窗口尺寸（逻辑像素，随 DPI 缩放）。
 const W: i32 = 340;
 const H: i32 = 132;
@@ -87,6 +90,8 @@ pub fn is_finished(elapsed_ms: i64) -> bool {
 
 struct Splash {
     hwnd: HWND,
+    /// 动画结束时要通知的窗口（控制器）。
+    owner: HWND,
     fonts: Fonts,
     metrics: Metrics,
     started_at: std::time::Instant,
@@ -245,8 +250,20 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_TIMER => {
             if let Some(st) = state(hwnd) {
                 if !st.advance() {
+                    let owner = st.owner;
                     unsafe { KillTimer(hwnd, 1) };
                     unsafe { DestroyWindow(hwnd) };
+                    // 动画放完再收尾：告诉控制器"可以进主界面了"。
+                    if !owner.is_null() {
+                        unsafe {
+                            windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                                owner,
+                                WM_SPLASH_DONE,
+                                0,
+                                0,
+                            )
+                        };
+                    }
                 }
             }
             return 0;
@@ -296,7 +313,7 @@ pub fn window_size(dpi: u32) -> (i32, i32) {
 }
 
 /// 显示启动动画。失败时静默返回 `None`：动画可有可无，绝不能因为它影响启动。
-pub fn show(hinstance: HINSTANCE) -> Option<HWND> {
+pub fn show(owner: HWND, hinstance: HINSTANCE) -> Option<HWND> {
     let dpi = {
         let d = unsafe { GetDpiForSystem() };
         if d == 0 {
@@ -308,8 +325,12 @@ pub fn show(hinstance: HINSTANCE) -> Option<HWND> {
     let (w, h) = window_size(dpi);
     let (x, y) = crate::win::screen::center_on_primary(w, h);
 
-    let mut st = Box::new(Splash {
+    // 所有权必须交给窗口：`Box` 若留在栈上，show() 返回时就会被释放，
+    // 而窗口的 GWLP_USERDATA 仍指向那块内存 —— WM_TIMER 一来就是 use-after-free。
+    // 这正是"启动动画永远停在 alpha=0、窗口不消失、有时直接崩进程"的根因。
+    let ptr = Box::into_raw(Box::new(Splash {
         hwnd: std::ptr::null_mut(),
+        owner,
         fonts: Fonts::create(&Metrics::new(dpi)),
         metrics: Metrics::new(dpi),
         started_at: std::time::Instant::now(),
@@ -318,8 +339,7 @@ pub fn show(hinstance: HINSTANCE) -> Option<HWND> {
         w,
         h,
         mem: None,
-    });
-    let ptr = (&mut *st) as *mut Splash;
+    }));
     let cls = to_wide(CLASS_NAME);
     let title = to_wide(crate::APP_TITLE);
     let ex_style = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
@@ -367,6 +387,7 @@ pub fn render_preview(at_ms: i64) -> Option<(i32, i32, Vec<u8>)> {
     let metrics = Metrics::new(dpi);
     let st = Splash {
         hwnd: std::ptr::null_mut(),
+        owner: std::ptr::null_mut(),
         fonts: Fonts::create(&metrics),
         metrics,
         started_at: std::time::Instant::now()

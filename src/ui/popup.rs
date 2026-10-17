@@ -427,16 +427,19 @@ impl PopupState {
             return;
         }
         let m = &self.metrics;
-        let line = m.fs_preview + m.gap;
-        let top = m.title_h + (m.header_h - line) / 2;
         let left = m.pad + m.mark + 4;
+        // 与 render_header 用同一套算法（同样的字体度量），基线才对得上。
+        let hdc = unsafe { windows_sys::Win32::Graphics::Gdi::GetDC(self.hwnd) };
+        let h = gdi::text_height(hdc, self.fonts.ui).max(m.fs_preview);
+        unsafe { windows_sys::Win32::Graphics::Gdi::ReleaseDC(self.hwnd, hdc) };
+        let top = m.title_h + (m.header_h - h) / 2;
         unsafe {
             MoveWindow(
                 self.edit,
                 left,
                 top,
                 (m.width - m.pad - left).max(10),
-                line,
+                h + 2,
                 1,
             )
         };
@@ -614,26 +617,33 @@ impl PopupState {
     ///
     /// 没有输入框边框、没有浅灰底色 —— 那会让顶部看起来像"控制面板"。
     /// 这里要的是"在纸上写一行字"，所以只有文字和它下面的那条地面线。
+    /// 顶部输入行的**文字带**（y 与高度）。标签、输入文字、光标、EDIT 子窗口
+    /// 全部按这一条带摆放，才能保证字号不同也依然是同一个基线。
+    fn input_line(&self, dc: HDC) -> (i32, i32) {
+        let m = self.metrics;
+        let h = gdi::text_height(dc, self.fonts.ui).max(m.fs_preview);
+        (m.title_h + (m.header_h - h) / 2, h)
+    }
+
     fn render_header(&self, dc: HDC, w: i32) {
         let m = self.metrics;
-        // 标签和输入**必须同字号同基线**：11px 等宽的"搜索"挨着 15px 的输入文字，
-        // 一眼就是"两个东西拼在一起"。现在统一 15px 界面字体，只靠颜色退到三级灰。
-        let label_rc = rect(m.pad, m.title_h, m.pad + m.mark + 4, m.list_top() - 2);
-        gdi::text(dc, self.fonts.ui, color::INK3, &label_rc, "搜索", true);
+        let (text_top, text_h) = self.input_line(dc);
+        // 标签和输入**同字号、同一条文字带**：11px 等宽的"搜索"挨着 15px 的输入
+        // 文字会像两个东西拼在一起；光统一字号还不够，基线也要用同一套计算。
+        let label_rc = rect(m.pad, text_top, m.pad + m.mark + 4, text_top + text_h);
+        gdi::text(dc, self.fonts.ui, color::INK3, &label_rc, "搜索", false);
         // 预览模式：子窗口（EDIT）不参与离屏渲染，这里代画输入框内容 ——
         // 空字符串就画一根光标，让预览图能表达"这里可以打字"。
         if let Some(text) = &self.preview_text {
             let input_left = m.pad + m.mark + 4;
             if text.is_empty() {
-                let caret_h = (m.fs_preview + 4).min(m.header_h - 10);
-                let y = m.title_h + (m.header_h - caret_h) / 2;
                 gdi::fill(
                     dc,
-                    &rect(input_left, y, input_left + 1, y + caret_h),
+                    &rect(input_left, text_top, input_left + 1, text_top + text_h),
                     color::INK,
                 );
             } else {
-                let input_rc = rect(input_left, m.title_h + 1, w - m.pad, m.list_top() - 2);
+                let input_rc = rect(input_left, text_top, w - m.pad, text_top + text_h);
                 gdi::text(dc, self.fonts.ui, color::INK, &input_rc, text, false);
             }
         }

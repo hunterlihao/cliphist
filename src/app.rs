@@ -48,6 +48,8 @@ pub const CLASS_NAME: &str = "ClipHist.Ctl";
 pub const WM_APP_ITEM_READY: u32 = WM_APP + 20;
 
 const TRAY_ID: u32 = 1;
+/// 控制器 → 自己：把主窗口显示出来（启动流程的第二步）。
+const WM_SHOW_MAIN: u32 = WM_APP + 19;
 /// 预览截断长度（与 `items.preview` 一致）。
 const PREVIEW_CHARS: usize = 200;
 /// 一次查询最多取多少条。
@@ -928,11 +930,18 @@ pub fn init_runtime(hwnd: HWND, autostart: bool) {
 
         // 开场动画：放在最前面，让它盖住后面这些初始化（托盘/监听/热键）。
         // 开机自启时一律不显示 —— 那时候用户没在等，弹一张卡片只会打扰。
-        if app.settings.show_splash && !autostart {
+        // 启动流程：开场动画 → 主界面。
+        // 开机自启例外：那时候用户没在等，安静待在托盘里就好。
+        let mut wait_splash = false;
+        if !autostart && app.settings.show_splash {
             let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
             if !hinstance.is_null() {
-                crate::ui::splash::show(hinstance);
+                wait_splash = crate::ui::splash::show(hwnd, hinstance).is_some();
             }
+        }
+        if !autostart && !wait_splash {
+            // 没有动画（或动画没建起来）也要进主界面，不能只在托盘里等人来点。
+            unsafe { PostMessageW(hwnd, WM_SHOW_MAIN, 0, 0) };
         }
 
         // 托盘
@@ -1017,6 +1026,28 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             .and_then(|g| g.as_ref().map(|a| a.wake_msg))
             .unwrap_or(0)
     });
+    if msg == WM_SHOW_MAIN || msg == crate::ui::splash::WM_SPLASH_DONE {
+        // 由消息驱动而不是在 init_runtime 里直接开窗：那样会在 App 借用的过程中
+        // 再走一遍 SetWindowPos/SetFocus（同步派发消息），属于自己踩自己的重入坑。
+        let busy = APP.with(|c| match c.try_borrow_mut() {
+            Ok(mut g) => {
+                if let Some(app) = g.as_mut() {
+                    app.show_main();
+                }
+                false
+            }
+            Err(_) => true,
+        });
+        if busy {
+            let again = if msg == WM_SHOW_MAIN {
+                WM_SHOW_MAIN
+            } else {
+                crate::ui::splash::WM_SPLASH_DONE
+            };
+            unsafe { PostMessageW(hwnd, again, 0, 0) };
+        }
+        return 0;
+    }
     if wake_msg != 0 && msg == wake_msg {
         // 第二个实例来敲门：把居中的主窗口叫出来（用户能立刻看到反馈），
         // 而不是什么都不发生 —— 否则"双击没反应"和"程序崩了"看起来一样。
