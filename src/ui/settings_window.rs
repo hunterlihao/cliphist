@@ -183,7 +183,7 @@ struct SettingsState {
 
 impl SettingsState {
     fn new(hwnd: HWND, owner: HWND, values: Settings, data_path: String) -> Self {
-        let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
+        let dpi = crate::win::dpi::dpi_of_window(hwnd);
         let dpi = if dpi == 0 { 96 } else { dpi };
         let metrics = Metrics::new(dpi);
         SettingsState {

@@ -17,7 +17,7 @@ use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, CreateRoundRectRgn, EndPaint, InvalidateRect, SetWindowRgn, HDC, PAINTSTRUCT,
 };
-use windows_sys::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
+use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, KillTimer, LoadCursorW,
     RegisterClassExW, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
@@ -229,7 +229,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_CREATE => {
             if let Some(st) = state(hwnd) {
-                let dpi = unsafe { GetDpiForWindow(hwnd) };
+                let dpi = crate::win::dpi::dpi_of_window(hwnd);
                 let metrics = Metrics::new(if dpi == 0 { 96 } else { dpi });
                 st.metrics = metrics;
                 st.fonts = Fonts::create(&metrics);

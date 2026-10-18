@@ -170,7 +170,7 @@ static SUPPRESS_EN_CHANGE: std::sync::atomic::AtomicBool =
 
 impl PopupState {
     fn new(hwnd: HWND, owner: HWND, mode: Mode) -> PopupState {
-        let dpi = unsafe { GetDpiForWindow(hwnd) };
+        let dpi = crate::win::dpi::dpi_of_window(hwnd);
         let metrics = mode.metrics(if dpi == 0 { 96 } else { dpi });
         PopupState {
             hwnd,
@@ -1118,7 +1118,7 @@ pub fn clear_query(hwnd: HWND) {
 /// DPI 变化后重建字体与度量。
 pub fn rebuild_metrics(hwnd: HWND) {
     if let Some(st) = unsafe { state(hwnd) } {
-        let dpi = unsafe { GetDpiForWindow(hwnd) };
+        let dpi = crate::win::dpi::dpi_of_window(hwnd);
         st.metrics = Metrics::new(if dpi == 0 { 96 } else { dpi });
         st.fonts = Fonts::create(&st.metrics);
         if !st.edit.is_null() {

@@ -7,6 +7,8 @@ Windows 便携版剪贴板历史工具：记录**文本 / 文件 / 图片**，�
 不引入 WebView、不引入 GUI 框架、不引入 comctl32 —— 因为需求里写死了"运行内存占用越低越好"，
 而这几样东西每一个都要几十 MB 的代价。
 
+> 30 秒宣传片：[docs/promo/ClipHist-promo.mp4](docs/promo/ClipHist-promo.mp4)（1920×1080，全部画面来自程序自己的离屏渲染）
+
 ## 界面
 
 ![历史列表](docs/images/popup.png)

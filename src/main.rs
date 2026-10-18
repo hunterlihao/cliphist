@@ -117,6 +117,11 @@ fn main() -> ExitCode {
     if let Some(n) = arg_value(&args, "--bench-fill") {
         return bench_fill(n.unwrap_or(500), flag_value("--log"));
     }
+    if let Some(d) = flag_value("--dpi") {
+        if let Ok(dpi) = d.parse::<u32>() {
+            cliphist::win::dpi::force_dpi(dpi.max(96));
+        }
+    }
     if let Some(out) = flag_value("--render-preview") {
         return render_preview_cmd(
             &out,
@@ -265,7 +270,7 @@ fn render_settings_cmd(out_path: &str) -> ExitCode {
         eprintln!("创建设置窗口失败");
         return ExitCode::from(4);
     };
-    let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
+    let dpi = cliphist::win::dpi::dpi_of_window(hwnd);
     let dpi = if dpi == 0 { 96 } else { dpi };
     let l = Layout::new(dpi);
     let (w, h) = (l.width, l.height());
@@ -435,7 +440,7 @@ fn render_preview_cmd(out_path: &str, empty: bool, query: Option<String>, main: 
         ),
     ];
 
-    let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
+    let dpi = cliphist::win::dpi::dpi_of_window(hwnd);
     let dpi = if dpi == 0 { 96 } else { dpi };
     let m = if main {
         Metrics::main_window(dpi)

@@ -11,6 +11,17 @@ use windows_sys::Win32::UI::HiDpi::{
 
 pub const BASE_DPI: u32 = 96;
 
+/// 渲染预览时强制使用的 DPI（0 = 不强制）。
+///
+/// 宣传素材/文档配图需要 2 倍图，而命令行渲染没有真实窗口可问 DPI，
+/// 于是提供一个显式覆盖 —— 只影响 `--render-*` 这类离屏渲染。
+static FORCE_DPI: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// 强制离屏渲染使用的 DPI（0 取消）。仅用于 `--render-*` 与截图脚本。
+pub fn force_dpi(dpi: u32) {
+    FORCE_DPI.store(dpi, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// 进程级 DPI 感知。必须在创建窗口之前调用。
 ///
 /// 失败（例如已被清单文件固定）不致命：返回 false 让调用方继续走系统缩放。
@@ -20,6 +31,10 @@ pub fn set_process_dpi_awareness() -> bool {
 
 /// 窗口所在显示器的 DPI；拿不到时回落到 96。
 pub fn dpi_of_window(hwnd: HWND) -> u32 {
+    let forced = FORCE_DPI.load(std::sync::atomic::Ordering::Relaxed);
+    if forced != 0 {
+        return forced;
+    }
     let d = unsafe { GetDpiForWindow(hwnd) };
     if d == 0 {
         BASE_DPI
